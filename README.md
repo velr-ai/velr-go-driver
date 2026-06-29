@@ -71,8 +71,8 @@ Supported bundled platforms:
 
 ### Licensing In Simple Terms
 
-- The **Go binding source code** in this module is licensed under the project
-  license.
+- The **Go binding source code** in this module is licensed under the MIT
+  license in [`LICENSE`](LICENSE).
 - The **bundled native runtime binaries** may be used and freely redistributed
   in unmodified form under the terms of [`LICENSE.runtime`](LICENSE.runtime).
 
@@ -511,4 +511,6 @@ Velr source checkout.
 
 ## License
 
-See [`LICENSE`](LICENSE) and [`LICENSE.runtime`](LICENSE.runtime).
+The Go driver source is licensed under the MIT license in [`LICENSE`](LICENSE).
+The bundled native runtime binaries are licensed separately under
+[`LICENSE.runtime`](LICENSE.runtime).
