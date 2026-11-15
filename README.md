@@ -1,12 +1,11 @@
 # Velr
 
-Velr is an embedded property-graph database from Velr.ai, written in Rust,
-built on top of SQLite, and queried using the openCypher language.
+Velr is an embedded property-graph database from Velr.ai, queried using openCypher.
 
 It runs in-process and is designed for local, embedded, and edge use cases.
 
-This module provides the **Go bindings** for Velr. It wraps a bundled native
-runtime with a C ABI and exposes an idiomatic Go API for executing Cypher
+This module provides the **Go bindings** for Velr and bundles the database
+runtime. It exposes an idiomatic Go API for executing Cypher
 queries, streaming result tables, working with transactions, decoding graph
 values, and importing or exporting Arrow data.
 
@@ -26,28 +25,14 @@ We'd love to have you join the Velr community.
 
 ---
 
-## Release Status
+## Compatibility
 
-Velr is currently in public **alpha**.
+### Schema version 11 compatibility
 
-- The Go API is still evolving.
-- Velr supports openCypher and passes all positive openCypher TCK tests. Exact
-  error semantics are not guaranteed to match other openCypher implementations.
+New databases use schema version 11. Databases at schema versions 3 through 9
+require an [explicit migration](#schema-migration) before graph queries can run.
 
-### Schema Version 7 Compatibility
-
-This release's current on-disk schema is version 7. Supported older databases
-can be opened with `velr.Open` or `velr.OpenReadonly` without changing the file.
-Reads continue to work on those databases, but writes (`CREATE`, `MERGE`, `SET`,
-`DELETE`, `DETACH DELETE`, and other mutating queries) are only available after
-migrating to the current schema version. This is intentional: migration is an
-explicit maintenance operation, not a side effect of opening a database.
-
-Velr is already usable for real workflows and representative use cases, but
-rough edges remain and the API is not yet stable.
-
-Fulltext search and vector search are available today through Cypher DDL and
-`CALL` syntax. API details may still evolve while Velr remains alpha.
+Create fulltext and vector indexes with Cypher DDL and query them with `CALL`.
 
 ---
 
@@ -64,7 +49,8 @@ not need a Velr source checkout, Rust toolchain, or separate runtime package.
 
 Supported bundled platforms:
 
-- `darwin-universal`
+- `darwin-arm64`
+- `darwin-x64`
 - `linux-x64-gnu`
 - `linux-arm64-gnu`
 - `win32-x64-msvc`
@@ -126,23 +112,47 @@ db, err := velr.OpenReadonly("mygraph.db")
 ```
 
 `OpenReadonly` never creates, initializes, migrates, or repairs a database. The
-file must already exist and have a supported Velr schema version. Older
-supported databases, such as schema version 3, 4, 5, or 6 databases opened by a
-schema version 7 runtime, remain available for reads. Writes and features that
-require the current schema fail with a normal query error until the database is
-explicitly migrated.
+file must already exist and have a supported Velr schema version. After
+migrating an older database on a writable connection, reopen any read-only
+connections before querying it.
 
 Connections and active handles are not safe for concurrent use. Use one
 connection per goroutine when you need parallelism.
 
 ---
 
+## Database creation
+
+Use `Create` with `CreateOptions` to select zero or one inline edge property
+by its exact name. The selection applies across all relationship types and is
+fixed at creation. Empty options and databases newly created by `Open` select
+no inline edge property. `Create` returns an error if the destination file
+already exists.
+
+Eligible values include integers, floating-point numbers, and strings up to
+128 UTF-8 bytes. Read and write all values through ordinary Cypher queries.
+
+```go
+db, err := velr.Create("new-graph.db", velr.CreateOptions{
+    InlineEdgeProperties: []string{"timestamp"},
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+if err := db.Run("CREATE (:Person)-[:MET {timestamp: 1700000000}]->(:Person)"); err != nil {
+    log.Fatal(err)
+}
+```
+
+Use `CreateInMemory` for an in-memory database. Call
+`db.InlineEdgeProperties()` to inspect the selected names, including after
+reopening a file-backed database.
+
 ## Schema Migration
 
-Velr does not migrate supported older databases automatically on open. Use the
-driver migration API, or run `MIGRATE DATABASE`, from maintenance code when you
-intend to update the on-disk schema. See the release-status note above for the
-schema version 7 read/write compatibility behavior.
+Open the database on a writable connection and call `Migrate` or run
+`MIGRATE DATABASE` outside an active transaction.
 
 ```go
 db, err := velr.Open("mygraph.db")
@@ -174,6 +184,23 @@ if err != nil {
 }
 defer table.Close()
 ```
+
+## Maintenance
+
+After large deletes or prune operations on a file-backed database, call
+`db.Vacuum()` from maintenance code when you want to compact the database file:
+
+```go
+if err := db.Run("MATCH (n:Expired) DETACH DELETE n"); err != nil {
+    log.Fatal(err)
+}
+if err := db.Vacuum(); err != nil {
+    log.Fatal(err)
+}
+```
+
+`Vacuum()` must run on a writable current-schema connection outside an open
+transaction. The equivalent command for scripts is `VACUUM DATABASE`.
 
 ---
 
@@ -293,7 +320,9 @@ Explicit transactions are available with `BeginTx`, `Commit`, `Rollback`, and
 
 Named savepoints use `SavepointNamed`, `RollbackTo`, and `ReleaseSavepoint`.
 Named savepoints are stack-like: release the most recently created active named
-savepoint first.
+savepoint first. `Commit` automatically releases any still-active named
+savepoints from newest to oldest so that all surviving transaction changes are
+committed.
 
 `Savepoint.Release` keeps changes after the savepoint, `Savepoint.Rollback`
 discards them, and `Savepoint.Close` closes the native handle without an
@@ -347,6 +376,23 @@ Temporal constructors and clocks: `date`, `time`, `localtime`, `datetime`,
 Aggregates: `count`, `sum`, `avg`, `min`, `max`, `collect`,
 `percentileDisc`, and `percentileCont`.
 
+### Regular expression matching
+
+Use the openCypher operator `=~` to match an entire string against a regular
+expression. Matching is case-sensitive by default. Use `(?i)` for
+case-insensitive matching.
+
+```cypher
+RETURN 'alice' =~ '(?i)A.*' AS matched
+```
+
+This returns `true`.
+
+The pattern string uses the Rust regex dialect. Lookaround and backreferences
+are unsupported. A null or non-string operand yields `null`. An invalid
+pattern raises a query error when both operands are strings.
+See [supported pattern syntax](https://docs.rs/regex/latest/regex/#syntax).
+
 ---
 
 ## Fulltext Search
@@ -377,16 +423,98 @@ rows, err := db.QueryWithParams(`
 `, velr.Params{"query": `abstract:vector OR title:"query planning"`})
 ```
 
-Fulltext indexes use a sidecar next to file-backed databases. The sidecar is
-kept up to date by writes and rebuilt on open if it is missing or corrupt.
+Fulltext queries return up to 1,000 matches by default. Pass a third
+argument such as `{limit: 5000}` to change the cap.
+
+Fulltext queries see changes made earlier in the current transaction.
+Opening a file-backed database for writing applies pending index updates
+and repairs missing or corrupt index data. If the shared index cannot serve
+the query's snapshot, Velr builds a temporary index for that search. This
+can happen when updates are pending, a concurrent writer has published a
+newer index, or a read-only connection opens an index that needs repair.
+The temporary build scans the indexed graph.
 
 ---
 
 ## Vector Search
 
-Register an embedding callback, then reference it from `CREATE VECTOR INDEX`.
-Velr invokes the callback for index maintenance when indexed source values
-change and for text queries passed to `CALL db.index.vector.queryNodes(...)`.
+Velr supports two vector index shapes.
+
+If your application already computes embeddings, store them as a vector/list
+property and index that property. No embedder is needed, and queries pass a
+numeric vector/list:
+
+```go
+err := db.Run(`
+    CREATE (:Chunk {
+      id: 'chunk-1',
+      text: 'Graph databases store connected data',
+      embedding: [0.12, 0.34, 0.56]
+    })
+`)
+if err != nil {
+    log.Fatal(err)
+}
+
+err = db.Run(`
+    CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
+    FOR (n:Chunk)
+    ON (n.embedding)
+    OPTIONS { indexConfig: { dimensions: 3, metric: 'cosine' } }
+`)
+if err != nil {
+    log.Fatal(err)
+}
+
+rows, err := db.Query(`
+    CALL db.index.vector.queryNodes('chunkEmbedding', 10, [0.10, 0.30, 0.50])
+    YIELD node, score
+    RETURN node, score
+`)
+```
+
+For exact query-time scoring without a native vector index, use the
+Neo4j-compatible scalar function `vector.similarity.cosine(left, right)` inside
+`WITH`, `WHERE`, `RETURN`, and `ORDER BY`.
+
+For text-to-vector search, register an embedding callback and reference it from
+`CREATE VECTOR INDEX`. Velr invokes the callback for index maintenance when
+indexed source values change and for text queries passed to
+`CALL db.index.vector.queryNodes(...)`.
+
+`OPTIONS { indexConfig: ... }` configures Velr vector indexes. Prefer the
+Neo4j-style names where they exist; shorter aliases are accepted for existing
+queries and examples.
+
+```cypher
+OPTIONS {
+  indexConfig: {
+    `vector.dimensions`: 384,
+    `vector.similarity_function`: 'cosine',
+    embedder: 'text',
+    cache_policy: 'required',
+    `vector.hnsw.ef_search`: 128
+  }
+}
+```
+
+Core options:
+
+| Option | Accepted aliases | Meaning |
+|---|---|---|
+| `` `vector.dimensions` `` | `dimensions` | Required vector width. Every stored vector, embedder output, and query vector must contain exactly this many values. |
+| `` `vector.similarity_function` `` | `metric`, `similarity_function` | Distance function. Use `cosine` for most semantic embeddings, `l2`/`euclidean` for geometric distance, and `dot`/`inner_product`/`max_inner_product` for inner-product retrieval. Default: `cosine`. |
+| `embedder` | `velr.embedder` | Name of a registered callback for `ON EACH [...]` indexes. Omit it for stored-vector indexes such as `ON (n.embedding)`. |
+| `embedder_fingerprint` | `embedderFingerprint`, `velr.embedder_fingerprint` | Optional model/version metadata stored with the index definition. Velr does not use it to call the embedder. |
+| `cache_policy` | `cachePolicy` | Embedder-backed indexes only. `required` stores generated embeddings in the database so index files can be rebuilt without recomputing them; `best_effort` skips cache write errors; `none` stores no generated embedding cache. Defaults: `required` with `embedder`, `none` without. Stored-vector indexes require `none` because the vector property is already the durable source. |
+
+HNSW tuning options:
+
+| Option | Integer count | Meaning |
+|---|---:|---|
+| `` `vector.hnsw.m` `` | `1..512` neighbors | Maximum graph connectivity per vector. For example, `16` means each vector keeps roughly 16 HNSW neighbor links. Higher values can improve recall on difficult datasets, with more memory, larger index files, and slower builds. |
+| `` `vector.hnsw.ef_construction` `` | `1..3200` candidates | Build-time candidate pool per inserted vector. For example, `320` means the builder considers a working set of 320 candidate neighbors while placing each vector. Higher values can improve index quality and recall, usually with slower index creation. |
+| `` `vector.hnsw.ef_search` `` | `1..3200` candidates | Query-time candidate pool. For example, `128` means each search keeps a working set of 128 candidate vectors while traversing the HNSW graph. Higher values can improve recall, usually with slower searches. Velr's default is `64`. |
 
 ```go
 err := db.RegisterVectorEmbedder("toy", func(inputs []velr.VectorEmbeddingInput) ([][]float32, error) {
@@ -405,10 +533,11 @@ exact dimension count requested by the index.
 entity id, and selected fields. Each `VectorEmbeddingField` carries a typed
 `PropertyValue`; use `field.Value.Type` or `field.Value.Kind()` to inspect the
 Velr kind, `field.Value.GoValue()` for ordinary Go values, and
-`VectorEmbeddingInput.Text()` to join display strings for toy or local
-embedders.
+`VectorEmbeddingInput.Text()` to join display strings for text embedders.
 
-Vector indexes use a sidecar next to file-backed databases.
+For file-backed databases, Velr can repair missing or corrupt vector index data
+from the stored vectors or from registered embedders, depending on how the
+index was created.
 
 ---
 
@@ -489,8 +618,34 @@ For structured access, use `PlanCount`, `PlanMeta`, `StepCount`, `StepMeta`,
 
 ## Errors And Lifecycle
 
-Runtime failures return `*velr.Error` with a native error code and message.
-Driver-side validation uses ordinary Go errors where no native call was made.
+Runtime failures return `*velr.Error`. Use `errors.As` to access its `Code` and
+`Message` fields. `Code` is a numeric operation status. For Cypher errors,
+`Message` identifies the query category and compile-time or runtime phase. Query
+categories include `SyntaxError`, `TypeError`, `ArgumentError`,
+`EntityNotFound`, `ConstraintVerificationFailed`, `SemanticError`,
+`ParameterMissing`, `ProcedureNotFound`, and `ArithmeticError`. Diagnostic text
+explains the cause and provides context. Driver-side argument validation also
+returns ordinary Go errors.
+
+Check errors from query execution and from `Stream.NextTable`,
+`TxStream.NextTable`, and `Rows.Next` while consuming results. A returned stream
+or table does not mean the query has finished successfully.
+
+```go
+rows, err := db.Query("RETURN missing")
+if err != nil {
+    var queryErr *velr.Error
+    if errors.As(err, &queryErr) {
+        log.Printf("Velr status %d: %s", queryErr.Code, queryErr.Message)
+    } else {
+        log.Print(err)
+    }
+    return
+}
+fmt.Println(rows)
+```
+
+The example uses the standard `errors`, `fmt`, and `log` packages.
 
 Explicitly close `DB`, `Tx`, `Stream`, `TxStream`, `Table`, `Rows`,
 `Savepoint`, and `ExplainTrace` values. `Close` is idempotent on all closeable
@@ -504,10 +659,10 @@ keeps native resources deterministic.
 Runnable examples live in
 [github.com/velr-ai/velr-go-examples](https://github.com/velr-ai/velr-go-examples).
 
-The examples cover basic queries, transactions and savepoints, schema
-migration, read-only open, fulltext search, vector search, Arrow IPC, and Arrow
-C Data column binding. They use the published Go module; you do not need a
-Velr source checkout.
+The examples cover queries, transactions and savepoints, schema
+migration and maintenance, read-only open, fulltext search, vector search,
+Arrow IPC, and Arrow C Data column binding. They use the published Go module;
+you do not need a Velr source checkout.
 
 ## License
 

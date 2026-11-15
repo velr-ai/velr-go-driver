@@ -82,13 +82,16 @@ import (
 	"unsafe"
 )
 
-// VectorEmbedder is a synchronous embedding callback used by vector indexes.
+// VectorEmbedder is an embedding callback used by embedder-backed vector indexes.
 //
 // It receives a batch of inputs and must return one vector per input. Every
 // vector must have input.Dimensions finite float32 values.
+// Stored-vector indexes created with CREATE VECTOR INDEX ... ON (n.embedding)
+// index the stored vector/list property directly and do not call this callback.
 type VectorEmbedder func(inputs []VectorEmbeddingInput) ([][]float32, error)
 
-// VectorEmbeddingPurpose explains why Velr is asking for embeddings.
+// VectorEmbeddingPurpose explains why Velr is asking an embedder for embeddings.
+// It is only used by embedder-backed vector indexes.
 type VectorEmbeddingPurpose int
 
 const (
@@ -276,6 +279,9 @@ func (t StorageValueType) String() string {
 }
 
 // VectorEmbeddingField is one value passed to a vector embedder.
+// Fields are produced for CREATE VECTOR INDEX ... ON EACH [...] sources.
+// Stored-vector indexes created with ON (n.embedding) use that property
+// directly and do not pass it through an embedder.
 type VectorEmbeddingField struct {
 	// Name is the source field or property name when Velr supplied one.
 	Name string
@@ -305,6 +311,8 @@ func (f VectorEmbeddingField) GoValue() any {
 }
 
 // VectorEmbeddingInput is one source row passed to a vector embedder.
+// Stored-vector indexes created with ON (n.embedding) query with numeric
+// vectors/lists instead of producing embedder inputs.
 type VectorEmbeddingInput struct {
 	// IndexName is the vector index requesting embeddings.
 	IndexName string

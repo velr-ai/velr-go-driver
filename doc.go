@@ -1,10 +1,8 @@
 // Package velr provides Go bindings for the embedded Velr graph database.
 //
-// The package wraps the Velr native runtime through its public C ABI. The
-// module embeds the supported native runtime binaries, materializes the selected
-// runtime into the user cache directory on first use, and loads that exact ABI
-// version. Applications do not need a Velr source checkout or separate runtime
-// install.
+// Velr is openCypher compliant and supports additional Cypher features.
+// The module bundles native runtime binaries for supported platforms.
+// Applications do not need a Velr source checkout or separate runtime install.
 //
 // OpenInMemory opens an ephemeral graph. Open opens or creates a file-backed
 // graph. OpenReadonly opens an existing graph without creating, initializing,
@@ -16,6 +14,13 @@
 // Transaction methods provide the same shape on Tx. QueryOptions carries named
 // parameters and an optional max-result-row cap; the WithParams,
 // RunWithParams, QueryWithParams, and related helpers are convenience wrappers.
+//
+// Query and database failures return *Error. Use errors.As to access its Code
+// and Message fields. Code is a numeric operation status. For openCypher errors,
+// Message identifies the query error category and compile-time or runtime phase,
+// followed by diagnostic context. Check errors when starting a query, advancing
+// result tables, and fetching rows. Argument validation can also return ordinary
+// Go errors.
 //
 // Result data is exposed as Table, Rows, and Cell. Cell.Value returns plain Go
 // values; stricter conversions are available through AsBool, AsInt64,
@@ -34,12 +39,23 @@
 // driver migration API. Explain and ExplainAnalyze return ExplainTrace handles
 // with both compact and structured plan access.
 //
-// Fulltext search is available through Cypher. Vector indexes can use
-// RegisterVectorEmbedder to call a synchronous Go VectorEmbedder; callback
-// fields carry typed PropertyValue values. Arrow IPC bytes are supported with
-// BindArrowIPC and Table.ToArrowIPC; Arrow C Data Interface columns are
-// supported with BindArrow and BindArrowChunks. Bound Arrow names are consumed
-// from Cypher with UNWIND BIND('name') AS row.
+// Fulltext search is available through Cypher. Vector indexes can index stored
+// vector/list properties directly, or use RegisterVectorEmbedder to call a Go
+// VectorEmbedder for text-to-vector search; callback fields carry typed
+// PropertyValue values. CREATE VECTOR INDEX ... OPTIONS { indexConfig: ... }
+// configures Velr vector indexes. Prefer vector.dimensions and
+// vector.similarity_function where they exist; dimensions and metric are
+// accepted aliases. embedder names a registered callback for ON EACH [...]
+// indexes, embedder_fingerprint stores application model/version metadata, and
+// cache_policy controls embedder-output caching with required, best_effort, or
+// none. It defaults to required with an embedder and none without one.
+// Stored-vector indexes require none. HNSW tuning uses vector.hnsw.m (1..512
+// neighbor links per vector), vector.hnsw.ef_construction (1..3200 build
+// candidates per inserted vector), and vector.hnsw.ef_search (1..3200 query
+// candidates; default 64).
+// Arrow IPC bytes are supported with BindArrowIPC and Table.ToArrowIPC; Arrow C
+// Data Interface columns are supported with BindArrow and BindArrowChunks.
+// Bound Arrow names are consumed from Cypher with UNWIND BIND('name') AS row.
 //
 // Handles are connection-affine: do not use the same DB, transaction, stream,
 // table, row cursor, savepoint, or explain trace concurrently from multiple

@@ -3,9 +3,11 @@ package velr
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"unsafe"
 
@@ -53,6 +55,23 @@ func TestSmokeFullAPI(t *testing.T) {
 		}
 		if len(rows) != 1 || rows[0]["age"] != int64(42) || rows[0]["active"] != true {
 			t.Fatalf("parameterized query returned %#v", rows)
+		}
+
+		mustRun(t, db.RunWithParams(`
+			UNWIND $rows AS row
+			WITH row.id AS id, row.name AS name
+			CREATE (:Thing {id: id, name: name})
+		`, Params{"rows": []map[string]any{
+			{"id": "a", "name": "Alpha", "unused": map[string]any{"nested": true}},
+			{"id": "b", "name": "Beta", "unused": []any{1, 2, 3}},
+		}}))
+		rows, err = db.Query("MATCH (t:Thing) RETURN t.id AS id, t.name AS name ORDER BY id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantThings := []map[string]any{{"id": "a", "name": "Alpha"}, {"id": "b", "name": "Beta"}}
+		if !reflect.DeepEqual(rows, wantThings) {
+			t.Fatalf("projected list-of-map import returned %#v, want %#v", rows, wantThings)
 		}
 
 		mustRun(t, db.RunWithParams("RETURN $payload AS payload", Params{
@@ -297,6 +316,12 @@ func TestSmokeFullAPI(t *testing.T) {
 		assertVectorEmbedderAPI(t, db)
 	})
 
+	t.Run("stored vector index", func(t *testing.T) {
+		db := openSmokeFileDB(t, "stored-vector.velr")
+		defer db.Close()
+		assertStoredVectorAPI(t, db)
+	})
+
 	t.Run("fulltext index", func(t *testing.T) {
 		db := openSmokeFileDB(t, "fulltext.velr")
 		defer db.Close()
@@ -304,11 +329,99 @@ func TestSmokeFullAPI(t *testing.T) {
 	})
 }
 
+func TestCommitReleasesActiveNamedSavepointsAndPersistsAllSurvivingWrites(t *testing.T) {
+	clearRuntimeOverrides(t)
+	path := filepath.Join(t.TempDir(), "commit-active-named-savepoints.velr")
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, tx.Run("CREATE (:CommitSavepoint {k:'before'})"))
+	if _, err := tx.SavepointNamed("outer"); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, tx.Run("CREATE (:CommitSavepoint {k:'middle'})"))
+	if _, err := tx.SavepointNamed("inner"); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, tx.Run("CREATE (:CommitSavepoint {k:'after'})"))
+	mustRun(t, tx.Commit())
+
+	tx, err = db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, tx.Run("CREATE (:CommitRetained {k:'before'})"))
+	if _, err := tx.SavepointNamed("retained"); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, tx.Run("CREATE (:CommitRetained {k:'discarded'})"))
+	mustRun(t, tx.RollbackTo("retained"))
+	mustRun(t, tx.Run("CREATE (:CommitRetained {k:'surviving'})"))
+	mustRun(t, tx.Commit())
+	mustRun(t, db.Close())
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	assertValues(t, reopened, "MATCH (n:CommitSavepoint) RETURN n.k AS k ORDER BY k", []string{"after", "before", "middle"})
+	assertValues(t, reopened, "MATCH (n:CommitRetained) RETURN n.k AS k ORDER BY k", []string{"before", "surviving"})
+}
+
 func clearRuntimeOverrides(t *testing.T) {
 	t.Helper()
+	t.Setenv("VELR_CACHE_DIR", "")
 	t.Setenv("VELR_RUNTIME_PATH", "")
 	t.Setenv("VELR_NATIVE_LIBRARY", "")
 	t.Setenv("VELR_LIB", "")
+}
+
+func TestMaterializeRuntimeParallelColdCache(t *testing.T) {
+	runtimeBytes := bytes.Repeat([]byte("velr-runtime"), 128*1024)
+	cacheDir := t.TempDir()
+	const filename = "libvelrc-test"
+	const workers = 32
+
+	var wg sync.WaitGroup
+	paths := make([]string, workers)
+	errs := make([]error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			paths[i], errs[i] = materializeRuntimeInCacheDir(runtimeBytes, filename, cacheDir)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d failed: %v", i, err)
+		}
+		if paths[i] == "" {
+			t.Fatalf("worker %d returned empty runtime path", i)
+		}
+	}
+	for _, path := range paths {
+		if path != paths[0] {
+			t.Fatalf("runtime paths differ: %q != %q", path, paths[0])
+		}
+	}
+	got, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, runtimeBytes) {
+		t.Fatalf("materialized runtime content mismatch")
+	}
 }
 
 func openSmokeDB(t *testing.T) *DB {
@@ -455,6 +568,9 @@ func assertMigrationAPI(t *testing.T, db *DB) {
 	}
 	if report.ToVersion < report.FromVersion {
 		t.Fatalf("invalid migration report: %#v", report)
+	}
+	if err := db.Vacuum(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1023,6 +1139,49 @@ func assertVectorEmbedderAPI(t *testing.T, db *DB) {
 	}
 	if !sawUnnamedVectorQuery(seen, "alpha query") {
 		t.Fatalf("vector callback did not expose typed query payload: %#v", seen)
+	}
+}
+
+func assertStoredVectorAPI(t *testing.T, db *DB) {
+	t.Helper()
+	mustRun(t, db.Run(`
+		CREATE
+		  (:Chunk {title:'Alpha', embedding:[1.0, 0.0, 0.0]}),
+		  (:Chunk {title:'Beta', embedding:[0.0, 1.0, 0.0]}),
+		  (:Chunk {title:'Gamma', embedding:[0.0, 0.0, 1.0]})
+	`))
+	err := db.Run(`
+		CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
+		FOR (n:Chunk)
+		ON (n.embedding)
+		OPTIONS {
+		  indexConfig: {
+		    dimensions: 3,
+		    metric: 'cosine'
+		  }
+		}
+	`)
+	if featureUnavailable(err, "vector-usearch") {
+		t.Skipf("bundled runtime does not include vector-usearch: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := db.QueryWithParams(`
+		CALL db.index.vector.queryNodes('chunkEmbedding', 1, $embedding)
+		YIELD node, score
+		RETURN node.title AS title, score
+	`, Params{"embedding": []float64{0.0, 1.0, 0.0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0]["title"] != "Beta" {
+		t.Fatalf("unexpected stored-vector query rows: %#v", rows)
+	}
+	score, ok := rows[0]["score"].(float64)
+	if !ok || score <= 0 {
+		t.Fatalf("unexpected stored-vector score: %#v", rows[0]["score"])
 	}
 }
 

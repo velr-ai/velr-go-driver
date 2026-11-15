@@ -76,6 +76,12 @@ typedef struct velr_query_options {
 	const velr_query_params *params;
 } velr_query_options;
 
+typedef struct velr_param_map_entry {
+	size_t row_index;
+	velr_strview key;
+	velr_cell value;
+} velr_param_map_entry;
+
 typedef struct velr_migration_report {
 	int32_t from_version;
 	int32_t to_version;
@@ -202,6 +208,8 @@ typedef struct velr_explain_stmt_meta {
 typedef void (*fn_velr_string_free)(char*);
 typedef void (*fn_velr_free)(uint8_t*, size_t);
 typedef velr_code (*fn_velr_open)(const char*, velr_db**, char**);
+typedef velr_code (*fn_velr_create)(const char*, const char* const*, size_t, velr_db**, char**);
+typedef velr_code (*fn_velr_inline_edge_properties_json)(velr_db*, char**, char**);
 typedef velr_code (*fn_velr_open_existing_readonly)(const char*, velr_db**, char**);
 typedef void (*fn_velr_close)(velr_db*);
 typedef velr_query_params* (*fn_velr_query_params_new)(void);
@@ -212,14 +220,21 @@ typedef velr_code (*fn_velr_query_params_set_i64)(velr_query_params*, velr_strvi
 typedef velr_code (*fn_velr_query_params_set_f64)(velr_query_params*, velr_strview, double, char**);
 typedef velr_code (*fn_velr_query_params_set_text)(velr_query_params*, velr_strview, velr_strview, char**);
 typedef velr_code (*fn_velr_query_params_set_json)(velr_query_params*, velr_strview, velr_strview, char**);
+typedef velr_code (*fn_velr_query_param_row_map_required_columns)(velr_strview, velr_strview, char**, char**);
+typedef velr_code (*fn_velr_query_params_set_row_maps)(velr_query_params*, velr_strview, size_t, const velr_param_map_entry*, size_t, char**);
+typedef velr_code (*fn_velr_query_params_set_row_map_columns)(velr_query_params*, velr_strview, size_t, const velr_strview*, size_t, const velr_cell*, const uint8_t*, char**);
+typedef velr_code (*fn_velr_query_params_set_row_map_packed_columns_u8_u32)(velr_query_params*, velr_strview, size_t, const velr_strview*, size_t, const uint8_t*, const int64_t*, const double*, const uint32_t*, const uint32_t*, const uint8_t*, size_t, const uint8_t*, char**);
 typedef velr_code (*fn_velr_schema_version)(velr_db*, int32_t*, char**);
 typedef velr_code (*fn_velr_current_schema_version)(velr_db*, int32_t*, char**);
 typedef velr_code (*fn_velr_needs_migration)(velr_db*, int*, char**);
 typedef velr_code (*fn_velr_migrate)(velr_db*, velr_migration_report*, char**);
+typedef velr_code (*fn_velr_vacuum)(velr_db*, char**);
 typedef void (*fn_velr_migration_report_clear)(velr_migration_report*);
 typedef velr_code (*fn_velr_register_vector_embedder)(velr_db*, velr_strview, velr_vector_embedder_callback, void*, velr_vector_embedder_free_callback, char**);
 typedef velr_code (*fn_velr_exec_start)(velr_db*, const char*, velr_stream**, char**);
 typedef velr_code (*fn_velr_exec_start_with_options)(velr_db*, const char*, const velr_query_options*, velr_stream**, char**);
+typedef velr_code (*fn_velr_run)(velr_db*, const char*, char**);
+typedef velr_code (*fn_velr_run_with_options)(velr_db*, const char*, const velr_query_options*, char**);
 typedef void (*fn_velr_exec_close)(velr_stream*);
 typedef velr_code (*fn_velr_stream_next_table)(velr_stream*, velr_table**, int*, char**);
 typedef velr_code (*fn_velr_exec_one)(velr_db*, const char*, velr_table**, char**);
@@ -240,6 +255,8 @@ typedef velr_code (*fn_velr_tx_rollback)(velr_tx*, char**);
 typedef void (*fn_velr_tx_close)(velr_tx*);
 typedef velr_code (*fn_velr_tx_exec_start)(velr_tx*, const char*, velr_stream_tx**, char**);
 typedef velr_code (*fn_velr_tx_exec_start_with_options)(velr_tx*, const char*, const velr_query_options*, velr_stream_tx**, char**);
+typedef velr_code (*fn_velr_tx_run)(velr_tx*, const char*, char**);
+typedef velr_code (*fn_velr_tx_run_with_options)(velr_tx*, const char*, const velr_query_options*, char**);
 typedef velr_code (*fn_velr_stream_tx_next_table)(velr_stream_tx*, velr_table**, int*, char**);
 typedef void (*fn_velr_exec_tx_close)(velr_stream_tx*);
 typedef velr_code (*fn_velr_tx_savepoint)(velr_tx*, velr_sp**, char**);
@@ -274,6 +291,8 @@ typedef struct velr_api {
 	fn_velr_string_free velr_string_free;
 	fn_velr_free velr_free;
 	fn_velr_open velr_open;
+	fn_velr_create velr_create;
+	fn_velr_inline_edge_properties_json velr_inline_edge_properties_json;
 	fn_velr_open_existing_readonly velr_open_existing_readonly;
 	fn_velr_close velr_close;
 	fn_velr_query_params_new velr_query_params_new;
@@ -284,14 +303,21 @@ typedef struct velr_api {
 	fn_velr_query_params_set_f64 velr_query_params_set_f64;
 	fn_velr_query_params_set_text velr_query_params_set_text;
 	fn_velr_query_params_set_json velr_query_params_set_json;
+	fn_velr_query_param_row_map_required_columns velr_query_param_row_map_required_columns;
+	fn_velr_query_params_set_row_maps velr_query_params_set_row_maps;
+	fn_velr_query_params_set_row_map_columns velr_query_params_set_row_map_columns;
+	fn_velr_query_params_set_row_map_packed_columns_u8_u32 velr_query_params_set_row_map_packed_columns_u8_u32;
 	fn_velr_schema_version velr_schema_version;
 	fn_velr_current_schema_version velr_current_schema_version;
 	fn_velr_needs_migration velr_needs_migration;
 	fn_velr_migrate velr_migrate;
+	fn_velr_vacuum velr_vacuum;
 	fn_velr_migration_report_clear velr_migration_report_clear;
 	fn_velr_register_vector_embedder velr_register_vector_embedder;
 	fn_velr_exec_start velr_exec_start;
 	fn_velr_exec_start_with_options velr_exec_start_with_options;
+	fn_velr_run velr_run;
+	fn_velr_run_with_options velr_run_with_options;
 	fn_velr_exec_close velr_exec_close;
 	fn_velr_stream_next_table velr_stream_next_table;
 	fn_velr_exec_one velr_exec_one;
@@ -312,6 +338,8 @@ typedef struct velr_api {
 	fn_velr_tx_close velr_tx_close;
 	fn_velr_tx_exec_start velr_tx_exec_start;
 	fn_velr_tx_exec_start_with_options velr_tx_exec_start_with_options;
+	fn_velr_tx_run velr_tx_run;
+	fn_velr_tx_run_with_options velr_tx_run_with_options;
 	fn_velr_stream_tx_next_table velr_stream_tx_next_table;
 	fn_velr_exec_tx_close velr_exec_tx_close;
 	fn_velr_tx_savepoint velr_tx_savepoint;
@@ -362,6 +390,8 @@ static int velr_go_api_load(velr_api *api, const char *path) {
 	VELR_GO_LOAD(velr_string_free);
 	VELR_GO_LOAD(velr_free);
 	VELR_GO_LOAD(velr_open);
+	api->velr_create = (fn_velr_create)velr_go_symbol(api->handle, "velr_create");
+	api->velr_inline_edge_properties_json = (fn_velr_inline_edge_properties_json)velr_go_symbol(api->handle, "velr_inline_edge_properties_json");
 	VELR_GO_LOAD(velr_open_existing_readonly);
 	VELR_GO_LOAD(velr_close);
 	VELR_GO_LOAD(velr_query_params_new);
@@ -372,14 +402,21 @@ static int velr_go_api_load(velr_api *api, const char *path) {
 	VELR_GO_LOAD(velr_query_params_set_f64);
 	VELR_GO_LOAD(velr_query_params_set_text);
 	VELR_GO_LOAD(velr_query_params_set_json);
+	VELR_GO_LOAD(velr_query_param_row_map_required_columns);
+	VELR_GO_LOAD(velr_query_params_set_row_maps);
+	VELR_GO_LOAD(velr_query_params_set_row_map_columns);
+	VELR_GO_LOAD(velr_query_params_set_row_map_packed_columns_u8_u32);
 	VELR_GO_LOAD(velr_schema_version);
 	VELR_GO_LOAD(velr_current_schema_version);
 	VELR_GO_LOAD(velr_needs_migration);
 	VELR_GO_LOAD(velr_migrate);
+	VELR_GO_LOAD(velr_vacuum);
 	VELR_GO_LOAD(velr_migration_report_clear);
 	VELR_GO_LOAD(velr_register_vector_embedder);
 	VELR_GO_LOAD(velr_exec_start);
 	VELR_GO_LOAD(velr_exec_start_with_options);
+	VELR_GO_LOAD(velr_run);
+	VELR_GO_LOAD(velr_run_with_options);
 	VELR_GO_LOAD(velr_exec_close);
 	VELR_GO_LOAD(velr_stream_next_table);
 	VELR_GO_LOAD(velr_exec_one);
@@ -400,6 +437,8 @@ static int velr_go_api_load(velr_api *api, const char *path) {
 	VELR_GO_LOAD(velr_tx_close);
 	VELR_GO_LOAD(velr_tx_exec_start);
 	VELR_GO_LOAD(velr_tx_exec_start_with_options);
+	VELR_GO_LOAD(velr_tx_run);
+	VELR_GO_LOAD(velr_tx_run_with_options);
 	VELR_GO_LOAD(velr_stream_tx_next_table);
 	VELR_GO_LOAD(velr_exec_tx_close);
 	VELR_GO_LOAD(velr_tx_savepoint);
@@ -435,6 +474,10 @@ static const char *velr_go_api_error(velr_api *api) { return api->err; }
 static void velr_go_string_free(velr_api *api, char *s) { api->velr_string_free(s); }
 static void velr_go_free(velr_api *api, uint8_t *p, size_t len) { api->velr_free(p, len); }
 static velr_code velr_go_open(velr_api *api, const char *path, velr_db **out, char **err) { return api->velr_open(path, out, err); }
+static int velr_go_has_create(velr_api *api) { return api->velr_create != NULL; }
+static int velr_go_has_inline_edge_properties(velr_api *api) { return api->velr_inline_edge_properties_json != NULL; }
+static velr_code velr_go_create(velr_api *api, const char *path, char **names, size_t count, velr_db **out, char **err) { return api->velr_create(path, (const char* const*)names, count, out, err); }
+static velr_code velr_go_inline_edge_properties_json(velr_api *api, velr_db *db, char **out, char **err) { return api->velr_inline_edge_properties_json(db, out, err); }
 static velr_code velr_go_open_existing_readonly(velr_api *api, const char *path, velr_db **out, char **err) { return api->velr_open_existing_readonly(path, out, err); }
 static void velr_go_close(velr_api *api, velr_db *db) { api->velr_close(db); }
 static velr_query_params *velr_go_query_params_new(velr_api *api) { return api->velr_query_params_new(); }
@@ -445,16 +488,23 @@ static velr_code velr_go_query_params_set_i64(velr_api *api, velr_query_params *
 static velr_code velr_go_query_params_set_f64(velr_api *api, velr_query_params *params, velr_strview name, double value, char **err) { return api->velr_query_params_set_f64(params, name, value, err); }
 static velr_code velr_go_query_params_set_text(velr_api *api, velr_query_params *params, velr_strview name, velr_strview value, char **err) { return api->velr_query_params_set_text(params, name, value, err); }
 static velr_code velr_go_query_params_set_json(velr_api *api, velr_query_params *params, velr_strview name, velr_strview value, char **err) { return api->velr_query_params_set_json(params, name, value, err); }
+static velr_code velr_go_query_param_row_map_required_columns(velr_api *api, velr_strview cypher, velr_strview param_name, char **out_json, char **err) { return api->velr_query_param_row_map_required_columns(cypher, param_name, out_json, err); }
+static velr_code velr_go_query_params_set_row_maps(velr_api *api, velr_query_params *params, velr_strview name, size_t row_count, const velr_param_map_entry *entries, size_t entry_count, char **err) { return api->velr_query_params_set_row_maps(params, name, row_count, entries, entry_count, err); }
+static velr_code velr_go_query_params_set_row_map_columns(velr_api *api, velr_query_params *params, velr_strview name, size_t row_count, const velr_strview *colnames, size_t col_count, const velr_cell *cells, const uint8_t *present, char **err) { return api->velr_query_params_set_row_map_columns(params, name, row_count, colnames, col_count, cells, present, err); }
+static velr_code velr_go_query_params_set_row_map_packed_columns_u8_u32(velr_api *api, velr_query_params *params, velr_strview name, size_t row_count, const velr_strview *colnames, size_t col_count, const uint8_t *cell_types, const int64_t *i64_values, const double *f64_values, const uint32_t *byte_offsets, const uint32_t *byte_lens, const uint8_t *bytes, size_t bytes_len, const uint8_t *present, char **err) { return api->velr_query_params_set_row_map_packed_columns_u8_u32(params, name, row_count, colnames, col_count, cell_types, i64_values, f64_values, byte_offsets, byte_lens, bytes, bytes_len, present, err); }
 static velr_code velr_go_schema_version(velr_api *api, velr_db *db, int32_t *out, char **err) { return api->velr_schema_version(db, out, err); }
 static velr_code velr_go_current_schema_version(velr_api *api, velr_db *db, int32_t *out, char **err) { return api->velr_current_schema_version(db, out, err); }
 static velr_code velr_go_needs_migration(velr_api *api, velr_db *db, int *out, char **err) { return api->velr_needs_migration(db, out, err); }
 static velr_code velr_go_migrate(velr_api *api, velr_db *db, velr_migration_report *out, char **err) { return api->velr_migrate(db, out, err); }
+static velr_code velr_go_vacuum(velr_api *api, velr_db *db, char **err) { return api->velr_vacuum(db, err); }
 static void velr_go_migration_report_clear(velr_api *api, velr_migration_report *report) { api->velr_migration_report_clear(report); }
 static velr_code velr_go_register_vector_embedder(velr_api *api, velr_db *db, velr_strview name, uintptr_t user_data, char **err) {
 	return api->velr_register_vector_embedder(db, name, velrGoVectorEmbedder, (void*)user_data, velrGoVectorEmbedderFree, err);
 }
 static velr_code velr_go_exec_start(velr_api *api, velr_db *db, const char *cypher, velr_stream **out, char **err) { return api->velr_exec_start(db, cypher, out, err); }
 static velr_code velr_go_exec_start_with_options(velr_api *api, velr_db *db, const char *cypher, const velr_query_options *opts, velr_stream **out, char **err) { return api->velr_exec_start_with_options(db, cypher, opts, out, err); }
+static velr_code velr_go_run(velr_api *api, velr_db *db, const char *cypher, char **err) { return api->velr_run(db, cypher, err); }
+static velr_code velr_go_run_with_options(velr_api *api, velr_db *db, const char *cypher, const velr_query_options *opts, char **err) { return api->velr_run_with_options(db, cypher, opts, err); }
 static void velr_go_exec_close(velr_api *api, velr_stream *stream) { api->velr_exec_close(stream); }
 static velr_code velr_go_stream_next_table(velr_api *api, velr_stream *stream, velr_table **out, int *has, char **err) { return api->velr_stream_next_table(stream, out, has, err); }
 static velr_code velr_go_exec_one(velr_api *api, velr_db *db, const char *cypher, velr_table **out, char **err) { return api->velr_exec_one(db, cypher, out, err); }
@@ -479,6 +529,8 @@ static velr_code velr_go_tx_rollback(velr_api *api, velr_tx *tx, char **err) { r
 static void velr_go_tx_close(velr_api *api, velr_tx *tx) { api->velr_tx_close(tx); }
 static velr_code velr_go_tx_exec_start(velr_api *api, velr_tx *tx, const char *cypher, velr_stream_tx **out, char **err) { return api->velr_tx_exec_start(tx, cypher, out, err); }
 static velr_code velr_go_tx_exec_start_with_options(velr_api *api, velr_tx *tx, const char *cypher, const velr_query_options *opts, velr_stream_tx **out, char **err) { return api->velr_tx_exec_start_with_options(tx, cypher, opts, out, err); }
+static velr_code velr_go_tx_run(velr_api *api, velr_tx *tx, const char *cypher, char **err) { return api->velr_tx_run(tx, cypher, err); }
+static velr_code velr_go_tx_run_with_options(velr_api *api, velr_tx *tx, const char *cypher, const velr_query_options *opts, char **err) { return api->velr_tx_run_with_options(tx, cypher, opts, err); }
 static velr_code velr_go_stream_tx_next_table(velr_api *api, velr_stream_tx *stream, velr_table **out, int *has, char **err) { return api->velr_stream_tx_next_table(stream, out, has, err); }
 static void velr_go_exec_tx_close(velr_api *api, velr_stream_tx *stream) { api->velr_exec_tx_close(stream); }
 static velr_code velr_go_tx_savepoint(velr_api *api, velr_tx *tx, velr_sp **out, char **err) { return api->velr_tx_savepoint(tx, out, err); }
@@ -527,6 +579,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/cgo"
+	"sort"
 	"strings"
 	"sync"
 	"unsafe"
@@ -540,8 +593,16 @@ const (
 )
 
 // Error is returned by Velr runtime and driver operations.
+//
+// For openCypher errors, Message identifies the query error category and
+// compile-time or runtime phase, followed by diagnostic context. Code is a
+// numeric operation status, separate from the query category. Use errors.As
+// to inspect an Error returned by query execution or result iteration.
+// Query categories include SyntaxError, TypeError, ArgumentError, EntityNotFound,
+// ConstraintVerificationFailed, SemanticError, ParameterMissing, ProcedureNotFound,
+// and ArithmeticError.
 type Error struct {
-	// Code is the numeric status code returned by the native runtime.
+	// Code is a numeric operation status, separate from the Cypher error category.
 	Code int
 
 	// Message is the human-readable error message returned by the runtime or driver.
@@ -633,10 +694,16 @@ type runtimePlatform struct {
 
 func currentRuntimePlatform() (runtimePlatform, bool) {
 	switch {
-	case runtime.GOOS == "darwin" && (runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64"):
+	case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
 		return runtimePlatform{
-			packageDir: "darwin-universal",
-			rustDir:    "macos-universal",
+			packageDir: "darwin-arm64",
+			rustDir:    "macos-aarch64",
+			names:      []string{"libvelrc.dylib", "velrc.dylib"},
+		}, true
+	case runtime.GOOS == "darwin" && runtime.GOARCH == "amd64":
+		return runtimePlatform{
+			packageDir: "darwin-x64",
+			rustDir:    "macos-x86_64",
 			names:      []string{"libvelrc.dylib", "velrc.dylib"},
 		}, true
 	case runtime.GOOS == "linux" && runtime.GOARCH == "amd64":
@@ -683,33 +750,52 @@ func resolveBundledRuntime() string {
 }
 
 func materializeRuntime(runtimeBytes []byte, filename string) (string, error) {
-	sum := sha256.Sum256(runtimeBytes)
-	hash := hex.EncodeToString(sum[:])[:16]
+	base, err := runtimeCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return materializeRuntimeInCacheDir(runtimeBytes, filename, base)
+}
+
+func runtimeCacheDir() (string, error) {
+	if base := os.Getenv("VELR_CACHE_DIR"); base != "" {
+		return base, nil
+	}
 	base, err := os.UserCacheDir()
 	if err != nil || base == "" {
 		base = os.TempDir()
 	}
+	return base, nil
+}
+
+func materializeRuntimeInCacheDir(runtimeBytes []byte, filename string, base string) (string, error) {
+	sum := sha256.Sum256(runtimeBytes)
+	hash := hex.EncodeToString(sum[:])
 	dir := filepath.Join(base, "velr", "go-runtime", runtime.GOOS+"-"+runtime.GOARCH+"-"+hash)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, filename)
-	if existing, err := os.ReadFile(path); err == nil {
-		if bytes.Equal(existing, runtimeBytes) {
-			return path, nil
-		}
-		_ = os.Remove(path)
+	if runtimeFileMatches(path, runtimeBytes) {
+		return path, nil
 	}
+	_ = os.Remove(path)
+
 	tmp, err := os.CreateTemp(dir, filename+".tmp-*")
 	if err != nil {
 		return "", err
 	}
 	tmpName := tmp.Name()
 	_, writeErr := tmp.Write(runtimeBytes)
+	syncErr := tmp.Sync()
 	closeErr := tmp.Close()
 	if writeErr != nil {
 		_ = os.Remove(tmpName)
 		return "", writeErr
+	}
+	if syncErr != nil {
+		_ = os.Remove(tmpName)
+		return "", syncErr
 	}
 	if closeErr != nil {
 		_ = os.Remove(tmpName)
@@ -719,11 +805,26 @@ func materializeRuntime(runtimeBytes []byte, filename string) (string, error) {
 		_ = os.Remove(tmpName)
 		return "", err
 	}
+	if runtimeFileMatches(path, runtimeBytes) {
+		_ = os.Remove(tmpName)
+		return path, nil
+	}
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
+		if runtimeFileMatches(path, runtimeBytes) {
+			return path, nil
+		}
 		return "", err
 	}
+	if !runtimeFileMatches(path, runtimeBytes) {
+		return "", fmt.Errorf("materialized Velr runtime %s failed content verification", path)
+	}
 	return path, nil
+}
+
+func runtimeFileMatches(path string, expected []byte) bool {
+	existing, err := os.ReadFile(path)
+	return err == nil && bytes.Equal(existing, expected)
 }
 
 func resolveLocalRuntime() string {
@@ -967,7 +1068,7 @@ func (q *rawQueryOptions) close() {
 	}
 }
 
-func (rt *nativeRuntime) makeQueryOptions(opts QueryOptions) (*rawQueryOptions, error) {
+func (rt *nativeRuntime) makeQueryOptions(opts QueryOptions, cypher string) (*rawQueryOptions, error) {
 	if opts.HasMaxResultRows && opts.MaxResultRows < 0 {
 		return nil, fmt.Errorf("max result rows cannot be negative")
 	}
@@ -983,6 +1084,11 @@ func (rt *nativeRuntime) makeQueryOptions(opts QueryOptions) (*rawQueryOptions, 
 		return raw, nil
 	}
 
+	rowMapHints, err := rt.rowMapColumnHintsForCypher(cypher, opts.Params)
+	if err != nil {
+		return nil, err
+	}
+
 	params := C.velr_go_query_params_new(&rt.api)
 	if params == nil {
 		return nil, newError(errErr, "velr_query_params_new returned null")
@@ -991,7 +1097,8 @@ func (rt *nativeRuntime) makeQueryOptions(opts QueryOptions) (*rawQueryOptions, 
 	raw.raw.params = params
 
 	for name, value := range opts.Params {
-		if err := rt.setParam(params, name, value); err != nil {
+		columns, hasColumns := rowMapHints[name]
+		if err := rt.setParam(params, name, value, columns, hasColumns); err != nil {
 			raw.close()
 			return nil, err
 		}
@@ -999,12 +1106,19 @@ func (rt *nativeRuntime) makeQueryOptions(opts QueryOptions) (*rawQueryOptions, 
 	return raw, nil
 }
 
-func (rt *nativeRuntime) setParam(params *C.velr_query_params, name string, value any) error {
+func validateQueryParamName(name string) error {
 	if name == "" {
 		return fmt.Errorf("query parameter name cannot be empty")
 	}
 	if strings.HasPrefix(name, "$") {
 		return fmt.Errorf("query parameter name should not include the leading '$'")
+	}
+	return nil
+}
+
+func (rt *nativeRuntime) setParam(params *C.velr_query_params, name string, value any, rowMapColumns []string, hasRowMapColumns bool) error {
+	if err := validateQueryParamName(name); err != nil {
+		return err
 	}
 
 	nameView, freeName, err := strviewFromString(name)
@@ -1075,6 +1189,12 @@ func (rt *nativeRuntime) setParam(params *C.velr_query_params, name string, valu
 		defer freeValue()
 		return rt.rcToErr(C.velr_go_query_params_set_json(&rt.api, params, nameView, valueView, &errPtr), errPtr)
 	default:
+		if rows, ok, err := rowMapsFromValue(value, hasRowMapColumns); err != nil {
+			return err
+		} else if ok && (hasRowMapColumns || len(rows) > 0) {
+			return rt.setParamRowMaps(params, nameView, name, rows, rowMapColumns, hasRowMapColumns)
+		}
+
 		bytes, err := queryParamJSON(value, name)
 		if err != nil {
 			return err
@@ -1083,6 +1203,427 @@ func (rt *nativeRuntime) setParam(params *C.velr_query_params, name string, valu
 		defer freeValue()
 		return rt.rcToErr(C.velr_go_query_params_set_json(&rt.api, params, nameView, valueView, &errPtr), errPtr)
 	}
+}
+
+const rowMapRequiredColumnsCacheMax = 256
+
+var rowMapRequiredColumnsCache = struct {
+	sync.Mutex
+	values map[string][]string
+}{
+	values: map[string][]string{},
+}
+
+func (rt *nativeRuntime) rowMapColumnHintsForCypher(cypher string, params Params) (map[string][]string, error) {
+	var hints map[string][]string
+	for name, value := range params {
+		if err := validateQueryParamName(name); err != nil {
+			return nil, err
+		}
+		if _, ok, err := rowMapsFromValue(value, true); err != nil {
+			return nil, err
+		} else if !ok {
+			continue
+		}
+		columns, err := rt.queryParamRowMapRequiredColumns(cypher, name)
+		if err != nil {
+			return nil, err
+		}
+		if columns == nil {
+			continue
+		}
+		if hints == nil {
+			hints = map[string][]string{}
+		}
+		hints[name] = columns
+	}
+	return hints, nil
+}
+
+func (rt *nativeRuntime) queryParamRowMapRequiredColumns(cypher, paramName string) ([]string, error) {
+	cacheKey := paramName + "\x00" + cypher
+	rowMapRequiredColumnsCache.Lock()
+	if columns, ok := rowMapRequiredColumnsCache.values[cacheKey]; ok {
+		rowMapRequiredColumnsCache.Unlock()
+		return columns, nil
+	}
+	rowMapRequiredColumnsCache.Unlock()
+
+	cypherView, freeCypher, err := strviewFromString(cypher)
+	if err != nil {
+		return nil, fmt.Errorf("openCypher: %w", err)
+	}
+	defer freeCypher()
+	paramNameView, freeName, err := strviewFromString(paramName)
+	if err != nil {
+		return nil, fmt.Errorf("query parameter name %q: %w", paramName, err)
+	}
+	defer freeName()
+
+	var outJSON *C.char
+	var errPtr *C.char
+	if err := rt.rcToErr(C.velr_go_query_param_row_map_required_columns(&rt.api, cypherView, paramNameView, &outJSON, &errPtr), errPtr); err != nil {
+		return nil, err
+	}
+
+	var columns []string
+	if outJSON != nil {
+		defer C.velr_go_string_free(&rt.api, outJSON)
+		if err := json.Unmarshal([]byte(C.GoString(outJSON)), &columns); err != nil {
+			return nil, fmt.Errorf("row-map required columns did not decode: %w", err)
+		}
+	}
+
+	rowMapRequiredColumnsCache.Lock()
+	rowMapRequiredColumnsCache.values[cacheKey] = columns
+	if len(rowMapRequiredColumnsCache.values) > rowMapRequiredColumnsCacheMax {
+		for key := range rowMapRequiredColumnsCache.values {
+			delete(rowMapRequiredColumnsCache.values, key)
+			break
+		}
+	}
+	rowMapRequiredColumnsCache.Unlock()
+	return columns, nil
+}
+
+func rowMapsFromValue(value any, allowEmpty bool) ([]map[string]any, bool, error) {
+	rv := reflect.ValueOf(value)
+	for rv.IsValid() && (rv.Kind() == reflect.Interface || rv.Kind() == reflect.Pointer) {
+		if rv.IsNil() {
+			return nil, false, nil
+		}
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) {
+		return nil, false, nil
+	}
+	if rv.Kind() == reflect.Slice && rv.IsNil() {
+		return nil, false, nil
+	}
+	if rv.Type().Elem().Kind() == reflect.Uint8 {
+		return nil, false, nil
+	}
+	if rv.Len() == 0 {
+		if allowEmpty && rowMapElementMayBeMap(rv.Type().Elem()) {
+			return []map[string]any{}, true, nil
+		}
+		return nil, false, nil
+	}
+
+	rows := make([]map[string]any, 0, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		row, ok, err := rowMapFromValue(rv.Index(i))
+		if err != nil || !ok {
+			return nil, ok, err
+		}
+		rows = append(rows, row)
+	}
+	return rows, true, nil
+}
+
+func rowMapElementMayBeMap(t reflect.Type) bool {
+	for t.Kind() == reflect.Interface || t.Kind() == reflect.Pointer {
+		if t.Kind() == reflect.Interface {
+			return true
+		}
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Map
+}
+
+func rowMapFromValue(rv reflect.Value) (map[string]any, bool, error) {
+	for rv.IsValid() && (rv.Kind() == reflect.Interface || rv.Kind() == reflect.Pointer) {
+		if rv.IsNil() {
+			return nil, false, nil
+		}
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() || rv.Kind() != reflect.Map {
+		return nil, false, nil
+	}
+	if rv.IsNil() {
+		return nil, false, nil
+	}
+	if rv.Type().Key().Kind() != reflect.String {
+		return nil, false, fmt.Errorf("query parameter row-map keys must be strings")
+	}
+
+	row := make(map[string]any, rv.Len())
+	iter := rv.MapRange()
+	for iter.Next() {
+		row[iter.Key().String()] = iter.Value().Interface()
+	}
+	return row, true, nil
+}
+
+func (rt *nativeRuntime) setParamRowMaps(params *C.velr_query_params, nameView C.velr_strview, name string, rows []map[string]any, projectedColumns []string, hasProjectedColumns bool) error {
+	if hasProjectedColumns {
+		return rt.setParamRowMapColumnsPacked(params, nameView, name, rows, projectedColumns, true)
+	}
+	if columns, ok := denseRowMapColumns(rows); ok {
+		return rt.setParamRowMapColumnsPacked(params, nameView, name, rows, columns, false)
+	}
+	columns := unionRowMapColumns(rows)
+	return rt.setParamRowMapColumnsPacked(params, nameView, name, rows, columns, true)
+}
+
+func denseRowMapColumns(rows []map[string]any) ([]string, bool) {
+	if len(rows) == 0 {
+		return []string{}, true
+	}
+	columns := sortedRowKeys(rows[0])
+	columnSet := stringSet(columns)
+	for _, row := range rows {
+		if len(row) != len(columns) {
+			return nil, false
+		}
+		for key := range row {
+			if _, ok := columnSet[key]; !ok {
+				return nil, false
+			}
+		}
+	}
+	return columns, true
+}
+
+func unionRowMapColumns(rows []map[string]any) []string {
+	var columns []string
+	seen := map[string]struct{}{}
+	for _, row := range rows {
+		for _, key := range sortedRowKeys(row) {
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			columns = append(columns, key)
+		}
+	}
+	return columns
+}
+
+func sortedRowKeys(row map[string]any) []string {
+	keys := make([]string, 0, len(row))
+	for key := range row {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func stringSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
+}
+
+func (rt *nativeRuntime) setParamRowMapColumnsPacked(params *C.velr_query_params, nameView C.velr_strview, name string, rows []map[string]any, columns []string, preserveMissing bool) error {
+	colViews, freeCols, err := strviewsFromStrings(columns)
+	if err != nil {
+		return err
+	}
+	defer freeAll(freeCols)
+
+	totalCells := len(rows) * len(columns)
+	cellTypes := make([]C.uint8_t, totalCells)
+	i64Values := make([]C.int64_t, totalCells)
+	f64Values := make([]C.double, totalCells)
+	byteOffsets := make([]C.uint32_t, totalCells)
+	byteLens := make([]C.uint32_t, totalCells)
+	var present []C.uint8_t
+	if preserveMissing && totalCells > 0 {
+		present = make([]C.uint8_t, totalCells)
+	}
+	bytes := make([]byte, 0, min(max(totalCells*32, 1024), 1024*1024))
+	columnSet := stringSet(columns)
+
+	for rowIndex, row := range rows {
+		if !preserveMissing && (len(row) != len(columns) || !rowHasColumns(row, columnSet)) {
+			return fmt.Errorf("query parameter %q row %d does not match row-map columns", name, rowIndex)
+		}
+		for columnIndex, column := range columns {
+			cellIndex := rowIndex*len(columns) + columnIndex
+			value, ok := row[column]
+			if !ok {
+				if preserveMissing {
+					cellTypes[cellIndex] = C.uint8_t(C.VELR_GO_NULL)
+					continue
+				}
+				return fmt.Errorf("query parameter %q row %d is missing column %q", name, rowIndex, column)
+			}
+			if len(present) > 0 {
+				present[cellIndex] = 1
+			}
+			if err := writePackedQueryParamCell(value, "$"+name+"."+column, cellIndex, cellTypes, i64Values, f64Values, byteOffsets, byteLens, &bytes); err != nil {
+				return err
+			}
+		}
+	}
+
+	var errPtr *C.char
+	err = rt.rcToErr(C.velr_go_query_params_set_row_map_packed_columns_u8_u32(
+		&rt.api,
+		params,
+		nameView,
+		C.size_t(len(rows)),
+		cStrViewPtr(colViews),
+		C.size_t(len(columns)),
+		cUint8Ptr(cellTypes),
+		cInt64Ptr(i64Values),
+		cDoublePtr(f64Values),
+		cUint32Ptr(byteOffsets),
+		cUint32Ptr(byteLens),
+		cBytesPtr(bytes),
+		C.size_t(len(bytes)),
+		cUint8Ptr(present),
+		&errPtr,
+	), errPtr)
+	runtime.KeepAlive(cellTypes)
+	runtime.KeepAlive(i64Values)
+	runtime.KeepAlive(f64Values)
+	runtime.KeepAlive(byteOffsets)
+	runtime.KeepAlive(byteLens)
+	runtime.KeepAlive(bytes)
+	runtime.KeepAlive(present)
+	return err
+}
+
+func rowHasColumns(row map[string]any, columns map[string]struct{}) bool {
+	for key := range row {
+		if _, ok := columns[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func writePackedQueryParamCell(
+	value any,
+	path string,
+	cellIndex int,
+	cellTypes []C.uint8_t,
+	i64Values []C.int64_t,
+	f64Values []C.double,
+	byteOffsets []C.uint32_t,
+	byteLens []C.uint32_t,
+	bytes *[]byte,
+) error {
+	normalized, err := normalizeQueryParam(value, path)
+	if err != nil {
+		return err
+	}
+	switch v := normalized.(type) {
+	case nil:
+		cellTypes[cellIndex] = C.uint8_t(C.VELR_GO_NULL)
+	case bool:
+		cellTypes[cellIndex] = C.uint8_t(C.VELR_GO_BOOL)
+		if v {
+			i64Values[cellIndex] = 1
+		}
+	case int64:
+		cellTypes[cellIndex] = C.uint8_t(C.VELR_GO_INT64)
+		i64Values[cellIndex] = C.int64_t(v)
+	case float64:
+		cellTypes[cellIndex] = C.uint8_t(C.VELR_GO_DOUBLE)
+		f64Values[cellIndex] = C.double(v)
+	case string:
+		return appendPackedQueryParamBytes(C.uint8_t(C.VELR_GO_TEXT), []byte(v), cellIndex, cellTypes, byteOffsets, byteLens, bytes)
+	case json.RawMessage:
+		return appendPackedQueryParamBytes(C.uint8_t(C.VELR_GO_JSON), []byte(v), cellIndex, cellTypes, byteOffsets, byteLens, bytes)
+	case []any, map[string]any:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("query parameter %s cannot be encoded as JSON: %w", path, err)
+		}
+		return appendPackedQueryParamBytes(C.uint8_t(C.VELR_GO_JSON), data, cellIndex, cellTypes, byteOffsets, byteLens, bytes)
+	default:
+		return fmt.Errorf("unsupported query parameter %s type %T", path, normalized)
+	}
+	return nil
+}
+
+func appendPackedQueryParamBytes(
+	kind C.uint8_t,
+	data []byte,
+	cellIndex int,
+	cellTypes []C.uint8_t,
+	byteOffsets []C.uint32_t,
+	byteLens []C.uint32_t,
+	bytes *[]byte,
+) error {
+	offset := len(*bytes)
+	if offset > math.MaxUint32 || len(data) > math.MaxUint32 {
+		return fmt.Errorf("query parameter row-map byte payload exceeds 32-bit packed ABI limit")
+	}
+	cellTypes[cellIndex] = kind
+	byteOffsets[cellIndex] = C.uint32_t(offset)
+	byteLens[cellIndex] = C.uint32_t(len(data))
+	*bytes = append(*bytes, data...)
+	return nil
+}
+
+func strviewsFromStrings(values []string) ([]C.velr_strview, []func(), error) {
+	views := make([]C.velr_strview, len(values))
+	frees := make([]func(), 0, len(values))
+	for idx, value := range values {
+		view, free, err := strviewFromString(value)
+		if err != nil {
+			freeAll(frees)
+			return nil, nil, fmt.Errorf("query parameter row-map column %q: %w", value, err)
+		}
+		views[idx] = view
+		frees = append(frees, free)
+	}
+	return views, frees, nil
+}
+
+func freeAll(frees []func()) {
+	for _, free := range frees {
+		free()
+	}
+}
+
+func cStrViewPtr(values []C.velr_strview) *C.velr_strview {
+	if len(values) == 0 {
+		return nil
+	}
+	return &values[0]
+}
+
+func cUint8Ptr(values []C.uint8_t) *C.uint8_t {
+	if len(values) == 0 {
+		return nil
+	}
+	return &values[0]
+}
+
+func cInt64Ptr(values []C.int64_t) *C.int64_t {
+	if len(values) == 0 {
+		return nil
+	}
+	return &values[0]
+}
+
+func cDoublePtr(values []C.double) *C.double {
+	if len(values) == 0 {
+		return nil
+	}
+	return &values[0]
+}
+
+func cUint32Ptr(values []C.uint32_t) *C.uint32_t {
+	if len(values) == 0 {
+		return nil
+	}
+	return &values[0]
+}
+
+func cBytesPtr(values []byte) *C.uint8_t {
+	if len(values) == 0 {
+		return nil
+	}
+	return (*C.uint8_t)(unsafe.Pointer(&values[0]))
 }
 
 func queryParamJSON(value any, name string) ([]byte, error) {
@@ -1512,6 +2053,74 @@ type DB struct {
 	closed bool
 }
 
+// CreateOptions configures a new Velr database.
+type CreateOptions struct {
+	// InlineEdgeProperties selects zero or one exact edge property name.
+	// The default is an empty selection. A selected name applies across all
+	// relationship types and is fixed at creation.
+	//
+	// Eligible values include integers, floating-point numbers, and strings
+	// up to 128 UTF-8 bytes. Read and write all values through ordinary Cypher
+	// queries.
+	InlineEdgeProperties []string
+}
+
+// Create creates a database with the supplied options and opens a writable
+// connection. Use ":memory:" for an in-memory database. Close the connection
+// when it is no longer needed.
+//
+// Create returns an error if the destination file already exists, the options
+// are invalid, or the native runtime does not support creation.
+func Create(path string, options CreateOptions) (*DB, error) {
+	return create(&path, options)
+}
+
+// CreateInMemory creates an in-memory database with the supplied options.
+// It returns an error if the options are invalid or the native runtime does
+// not support creation. Close the connection when it is no longer needed.
+func CreateInMemory(options CreateOptions) (*DB, error) {
+	return create(nil, options)
+}
+
+func create(path *string, options CreateOptions) (*DB, error) {
+	rt, err := runtimeAPI()
+	if err != nil {
+		return nil, err
+	}
+	if C.velr_go_has_create(&rt.api) == 0 {
+		return nil, errors.New("loaded Velr runtime does not expose velr_create")
+	}
+	var cpath *C.char
+	if path != nil {
+		var free func()
+		cpath, free, err = cString(*path, "database path")
+		if err != nil {
+			return nil, err
+		}
+		defer free()
+	}
+
+	var names []*C.char
+	for _, name := range options.InlineEdgeProperties {
+		native, free, err := cString(name, "inline edge property")
+		if err != nil {
+			return nil, err
+		}
+		defer free()
+		names = append(names, native)
+	}
+	var out *C.velr_db
+	var errPtr *C.char
+	rc := C.velr_go_create(&rt.api, cpath, unsafe.SliceData(names), C.size_t(len(names)), &out, &errPtr)
+	if err := rt.rcToErr(rc, errPtr); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return nil, newError(errErr, "velr_create returned null database")
+	}
+	return newDB(rt, out), nil
+}
+
 // OpenInMemory opens an in-memory Velr database.
 func OpenInMemory() (*DB, error) {
 	return open(nil)
@@ -1650,6 +2259,34 @@ func (db *DB) NeedsMigration() (bool, error) {
 	return out != 0, nil
 }
 
+// InlineEdgeProperties returns the configured names in order, or an empty
+// slice if none are configured. File-backed databases retain the selection
+// across reopen. It returns an error for a closed connection or a runtime
+// without this API.
+func (db *DB) InlineEdgeProperties() ([]string, error) {
+	ptr, err := db.dbPtr()
+	if err != nil {
+		return nil, err
+	}
+	if C.velr_go_has_inline_edge_properties(&db.rt.api) == 0 {
+		return nil, errors.New("loaded Velr runtime does not expose velr_inline_edge_properties_json")
+	}
+	var out, errPtr *C.char
+	rc := C.velr_go_inline_edge_properties_json(&db.rt.api, ptr, &out, &errPtr)
+	if err := db.rt.rcToErr(rc, errPtr); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return nil, newError(errErr, "velr_inline_edge_properties_json returned null")
+	}
+	defer C.velr_go_string_free(&db.rt.api, out)
+	var names []string
+	if err := json.Unmarshal([]byte(C.GoString(out)), &names); err != nil {
+		return nil, fmt.Errorf("decode inline edge properties: %w", err)
+	}
+	return names, nil
+}
+
 // MigrationStatus is returned by Migrate.
 type MigrationStatus string
 
@@ -1713,11 +2350,25 @@ func (db *DB) Migrate() (MigrationReport, error) {
 	}, nil
 }
 
+// Vacuum compacts a writable, current-schema database file with Velr's maintenance vacuum.
+func (db *DB) Vacuum() error {
+	ptr, err := db.dbPtr()
+	if err != nil {
+		return err
+	}
+	var errPtr *C.char
+	return db.rt.rcToErr(C.velr_go_vacuum(&db.rt.api, ptr, &errPtr), errPtr)
+}
+
 // RegisterVectorEmbedder registers or replaces a named vector embedding callback.
 //
-// Vector indexes refer to this name with
-// OPTIONS { indexConfig: { embedder: 'name' } }. The callback is invoked
-// synchronously by the native runtime, so it must not perform asynchronous work.
+// Embedder-backed vector indexes refer to this name with
+// OPTIONS { indexConfig: { embedder: 'name' } }. Velr calls the callback when
+// indexed source values change and when text query payloads need embeddings.
+//
+// Stored-vector indexes, such as CREATE VECTOR INDEX ... ON (n.embedding), do
+// not use a registered embedder. They index the vector/list property directly
+// and vector queries pass a numeric vector/list.
 func (db *DB) RegisterVectorEmbedder(name string, embedder VectorEmbedder) error {
 	ptr, err := db.dbPtr()
 	if err != nil {
@@ -1745,6 +2396,10 @@ func (db *DB) RegisterVectorEmbedder(name string, embedder VectorEmbedder) error
 }
 
 // Exec executes Cypher and returns a stream of result tables.
+//
+// Query failures return an *Error. Further query failures can be returned by
+// Stream.NextTable or Rows.Next while consuming the results. Close the stream
+// when finished.
 func (db *DB) Exec(cypher string, options ...QueryOptions) (*Stream, error) {
 	ptr, err := db.dbPtr()
 	if err != nil {
@@ -1763,7 +2418,7 @@ func (db *DB) Exec(cypher string, options ...QueryOptions) (*Stream, error) {
 
 	var rawOpts *rawQueryOptions
 	if hasOpts {
-		rawOpts, err = db.rt.makeQueryOptions(opts)
+		rawOpts, err = db.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return nil, err
 		}
@@ -1805,7 +2460,7 @@ func (db *DB) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
 
 	var rawOpts *rawQueryOptions
 	if hasOpts {
-		rawOpts, err = db.rt.makeQueryOptions(opts)
+		rawOpts, err = db.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return nil, err
 		}
@@ -1830,24 +2485,37 @@ func (db *DB) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
 
 // Run executes Cypher and discards all result tables.
 func (db *DB) Run(cypher string, options ...QueryOptions) error {
-	stream, err := db.Exec(cypher, options...)
+	ptr, err := db.dbPtr()
 	if err != nil {
 		return err
 	}
-	defer stream.Close()
+	ccypher, free, err := cString(cypher, "openCypher")
+	if err != nil {
+		return err
+	}
+	defer free()
 
-	for {
-		table, err := stream.NextTable()
+	opts, hasOpts, err := pickOptions(options)
+	if err != nil {
+		return err
+	}
+
+	var rawOpts *rawQueryOptions
+	if hasOpts {
+		rawOpts, err = db.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return err
 		}
-		if table == nil {
-			return nil
-		}
-		if err := table.Close(); err != nil {
-			return err
-		}
+		defer rawOpts.close()
 	}
+
+	var errPtr *C.char
+	if hasOpts {
+		err = db.rt.rcToErr(C.velr_go_run_with_options(&db.rt.api, ptr, ccypher, &rawOpts.raw, &errPtr), errPtr)
+	} else {
+		err = db.rt.rcToErr(C.velr_go_run(&db.rt.api, ptr, ccypher, &errPtr), errPtr)
+	}
+	return err
 }
 
 // Query executes Cypher and converts the single result table to row objects.
@@ -2245,6 +2913,7 @@ func (s *Stream) streamPtr() (*C.velr_stream, error) {
 }
 
 // NextTable returns the next table, or nil when the stream is exhausted.
+// It returns an *Error if query execution fails while advancing the stream.
 func (s *Stream) NextTable() (*Table, error) {
 	ptr, err := s.streamPtr()
 	if err != nil {
@@ -2486,6 +3155,7 @@ func (r *Rows) rowsPtr() (*C.velr_rows, error) {
 }
 
 // Next returns the next row, or nil at EOF.
+// It returns an *Error if query execution fails while fetching the row.
 func (r *Rows) Next() ([]Cell, error) {
 	ptr, err := r.rowsPtr()
 	if err != nil {
@@ -2582,6 +3252,10 @@ func (tx *Tx) txPtr() (*C.velr_tx, error) {
 }
 
 // Exec executes Cypher inside the transaction.
+//
+// Query failures return an *Error. Further query failures can be returned by
+// TxStream.NextTable or Rows.Next while consuming the results. Close the stream
+// when finished.
 func (tx *Tx) Exec(cypher string, options ...QueryOptions) (*TxStream, error) {
 	ptr, err := tx.txPtr()
 	if err != nil {
@@ -2599,7 +3273,7 @@ func (tx *Tx) Exec(cypher string, options ...QueryOptions) (*TxStream, error) {
 	}
 	var rawOpts *rawQueryOptions
 	if hasOpts {
-		rawOpts, err = tx.rt.makeQueryOptions(opts)
+		rawOpts, err = tx.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return nil, err
 		}
@@ -2651,23 +3325,37 @@ func (tx *Tx) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
 
 // Run executes Cypher inside the transaction and discards result tables.
 func (tx *Tx) Run(cypher string, options ...QueryOptions) error {
-	stream, err := tx.Exec(cypher, options...)
+	ptr, err := tx.txPtr()
 	if err != nil {
 		return err
 	}
-	defer stream.Close()
-	for {
-		table, err := stream.NextTable()
+	ccypher, free, err := cString(cypher, "openCypher")
+	if err != nil {
+		return err
+	}
+	defer free()
+
+	opts, hasOpts, err := pickOptions(options)
+	if err != nil {
+		return err
+	}
+
+	var rawOpts *rawQueryOptions
+	if hasOpts {
+		rawOpts, err = tx.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return err
 		}
-		if table == nil {
-			return nil
-		}
-		if err := table.Close(); err != nil {
-			return err
-		}
+		defer rawOpts.close()
 	}
+
+	var errPtr *C.char
+	if hasOpts {
+		err = tx.rt.rcToErr(C.velr_go_tx_run_with_options(&tx.rt.api, ptr, ccypher, &rawOpts.raw, &errPtr), errPtr)
+	} else {
+		err = tx.rt.rcToErr(C.velr_go_tx_run(&tx.rt.api, ptr, ccypher, &errPtr), errPtr)
+	}
+	return err
 }
 
 // Query executes Cypher inside the transaction and converts the single table to objects.
@@ -2872,8 +3560,28 @@ func (tx *Tx) consume() (*C.velr_tx, error) {
 	return ptr, nil
 }
 
-// Commit commits the transaction. The transaction is consumed.
+func (tx *Tx) releaseNamedSavepointsForCommit() error {
+	for {
+		tx.mu.Lock()
+		if len(tx.namedSavepoints) == 0 {
+			tx.mu.Unlock()
+			return nil
+		}
+		sp := tx.namedSavepoints[len(tx.namedSavepoints)-1]
+		tx.mu.Unlock()
+
+		if err := sp.Release(); err != nil {
+			return err
+		}
+	}
+}
+
+// Commit commits the transaction. Active named savepoints are released first,
+// and then the transaction is consumed.
 func (tx *Tx) Commit() error {
+	if err := tx.releaseNamedSavepointsForCommit(); err != nil {
+		return err
+	}
 	ptr, err := tx.consume()
 	if err != nil {
 		return err
@@ -2956,6 +3664,7 @@ func (s *TxStream) streamPtr() (*C.velr_stream_tx, error) {
 }
 
 // NextTable returns the next table, or nil when the stream is exhausted.
+// It returns an *Error if query execution fails while advancing the stream.
 func (s *TxStream) NextTable() (*Table, error) {
 	ptr, err := s.streamPtr()
 	if err != nil {
