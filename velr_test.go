@@ -2,10 +2,14 @@ package velr
 
 import (
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -382,6 +386,77 @@ func clearRuntimeOverrides(t *testing.T) {
 	t.Setenv("VELR_RUNTIME_PATH", "")
 	t.Setenv("VELR_NATIVE_LIBRARY", "")
 	t.Setenv("VELR_LIB", "")
+}
+
+func TestBundledRuntimeExtraction(t *testing.T) {
+	platform, ok := currentRuntimePlatform()
+	if !ok {
+		t.Skip("no bundled runtime for this target")
+	}
+	cacheDir := t.TempDir()
+	t.Setenv("VELR_CACHE_DIR", cacheDir)
+	path, err := resolveBundledRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(cacheDir, path)
+	if err != nil || !filepath.IsLocal(rel) || filepath.Base(path) != platform.names[0] {
+		t.Fatalf("expected the native library under the configured cache %q, got %q", cacheDir, path)
+	}
+
+	archive, err := gzip.NewReader(bytes.NewReader(embeddedRuntime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	wantHash := sha256.New()
+	if _, err := io.Copy(wantHash, archive); err != nil {
+		t.Fatal(err)
+	}
+	library, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotHash := sha256.Sum256(library)
+	if !bytes.Equal(gotHash[:], wantHash.Sum(nil)) {
+		t.Fatal("extracted library differs from bundled library")
+	}
+}
+
+func TestBundledRuntimeUnusableCache(t *testing.T) {
+	if _, ok := currentRuntimePlatform(); !ok {
+		t.Skip("no bundled runtime for this target")
+	}
+	cacheDir := filepath.Join(t.TempDir(), "cache-file")
+	if err := os.WriteFile(cacheDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VELR_CACHE_DIR", cacheDir)
+	path, err := resolveBundledRuntime()
+	var pathErr *os.PathError
+	if path != "" || !errors.As(err, &pathErr) {
+		t.Fatalf("expected cache path error, got path %q and error %v", path, err)
+	}
+	for _, detail := range []string{strconv.Quote(cacheDir), "VELR_CACHE_DIR", "VELR_RUNTIME_PATH"} {
+		if !strings.Contains(err.Error(), detail) {
+			t.Errorf("cache error %q is missing %q", err, detail)
+		}
+	}
+}
+
+func TestRuntimePathOverrideBypassesCache(t *testing.T) {
+	clearRuntimeOverrides(t)
+	library := filepath.Join(t.TempDir(), "external-library")
+	if err := os.WriteFile(library, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file makes the cache unusable independently of process permissions.
+	t.Setenv("VELR_CACHE_DIR", library)
+	t.Setenv("VELR_RUNTIME_PATH", library)
+	path, err := resolveRuntimePath()
+	if err != nil || path != library {
+		t.Fatalf("expected existing runtime %q, got %q and error %v", library, path, err)
+	}
 }
 
 func TestMaterializeRuntimeParallelColdCache(t *testing.T) {

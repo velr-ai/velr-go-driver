@@ -3,7 +3,8 @@ package velr_test
 import (
 	"fmt"
 	"log"
-	"unsafe"
+	"os"
+	"path/filepath"
 
 	velr "github.com/velr-ai/velr-go-driver"
 )
@@ -27,6 +28,7 @@ func ExampleOpenInMemory() {
 		log.Fatal(err)
 	}
 	fmt.Println(rows[0]["name"], rows[0]["born"])
+	// Output: Keanu Reeves 1964
 }
 
 func ExampleOpenReadonly() {
@@ -148,7 +150,12 @@ func ExampleCell_AsProperty() {
 }
 
 func ExampleDB_RegisterVectorEmbedder() {
-	db, err := velr.OpenInMemory()
+	dir, err := os.MkdirTemp("", "velr-vector-example-")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	db, err := velr.Open(filepath.Join(dir, "graph.db"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -170,7 +177,7 @@ func ExampleDB_RegisterVectorEmbedder() {
 	}
 
 	err = db.Run(`
-		CREATE (:Paper {title: 'Graph retrieval'})
+		CREATE (:Paper {title: 'Graph retrieval'});
 		CREATE VECTOR INDEX paperEmbedding IF NOT EXISTS
 		FOR (p:Paper) ON EACH [p.title]
 		OPTIONS {indexConfig: {dimensions: 3, embedder: 'demo'}}
@@ -178,6 +185,8 @@ func ExampleDB_RegisterVectorEmbedder() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println("Vector index created")
+	// Output: Vector index created
 }
 
 func ExampleDB_BindArrowIPC() {
@@ -187,7 +196,15 @@ func ExampleDB_BindArrowIPC() {
 	}
 	defer db.Close()
 
-	var ipcFileBytes []byte
+	table, err := db.ExecOne("RETURN 'Ada' AS name")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer table.Close()
+	ipcFileBytes, err := table.ToArrowIPC()
+	if err != nil {
+		log.Fatal(err)
+	}
 	if err := db.BindArrowIPC("people", ipcFileBytes); err != nil {
 		log.Fatal(err)
 	}
@@ -196,26 +213,8 @@ func ExampleDB_BindArrowIPC() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(rows)
-}
-
-func ExampleDB_BindArrow() {
-	db, err := velr.OpenInMemory()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	var schemaPtr unsafe.Pointer
-	var arrayPtr unsafe.Pointer
-	err = db.BindArrow("people", []velr.ArrowColumn{{
-		Name:   "name",
-		Schema: schemaPtr,
-		Array:  arrayPtr,
-	}})
-	if err != nil {
-		log.Fatal(err)
-	}
+	fmt.Println(rows[0]["name"])
+	// Output: Ada
 }
 
 func ExampleDB_Explain() {

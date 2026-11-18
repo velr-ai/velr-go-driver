@@ -34,6 +34,7 @@ typedef struct velr_tx velr_tx;
 typedef struct velr_sp velr_sp;
 typedef struct velr_stream_tx velr_stream_tx;
 typedef struct velr_query_params velr_query_params;
+typedef struct velr_query_control velr_query_control;
 typedef struct velr_explain_trace velr_explain_trace;
 struct ArrowSchema;
 struct ArrowArray;
@@ -45,7 +46,9 @@ enum {
 	VELR_GO_EARG = -1,
 	VELR_GO_EUTF = -2,
 	VELR_GO_ESTATE = -3,
-	VELR_GO_EERR = -4
+	VELR_GO_EERR = -4,
+	VELR_GO_ECANCELLED = -5,
+	VELR_GO_EDEADLINE = -6
 };
 
 enum {
@@ -231,6 +234,14 @@ typedef velr_code (*fn_velr_migrate)(velr_db*, velr_migration_report*, char**);
 typedef velr_code (*fn_velr_vacuum)(velr_db*, char**);
 typedef void (*fn_velr_migration_report_clear)(velr_migration_report*);
 typedef velr_code (*fn_velr_register_vector_embedder)(velr_db*, velr_strview, velr_vector_embedder_callback, void*, velr_vector_embedder_free_callback, char**);
+typedef velr_query_control* (*fn_velr_query_control_new)(uint64_t);
+typedef void (*fn_velr_query_control_cancel)(const velr_query_control*);
+typedef void (*fn_velr_query_control_free)(velr_query_control*);
+typedef velr_code (*fn_velr_exec_start_with_control)(velr_db*, const char*, const velr_query_options*, const velr_query_control*, velr_stream**, char**);
+typedef velr_code (*fn_velr_exec_one_with_control)(velr_db*, const char*, const velr_query_options*, const velr_query_control*, velr_table**, char**);
+typedef velr_code (*fn_velr_run_with_control)(velr_db*, const char*, const velr_query_options*, const velr_query_control*, char**);
+typedef velr_code (*fn_velr_tx_exec_start_with_control)(velr_tx*, const char*, const velr_query_options*, const velr_query_control*, velr_stream_tx**, char**);
+typedef velr_code (*fn_velr_tx_run_with_control)(velr_tx*, const char*, const velr_query_options*, const velr_query_control*, char**);
 typedef velr_code (*fn_velr_exec_start)(velr_db*, const char*, velr_stream**, char**);
 typedef velr_code (*fn_velr_exec_start_with_options)(velr_db*, const char*, const velr_query_options*, velr_stream**, char**);
 typedef velr_code (*fn_velr_run)(velr_db*, const char*, char**);
@@ -314,6 +325,14 @@ typedef struct velr_api {
 	fn_velr_vacuum velr_vacuum;
 	fn_velr_migration_report_clear velr_migration_report_clear;
 	fn_velr_register_vector_embedder velr_register_vector_embedder;
+	fn_velr_query_control_new velr_query_control_new;
+	fn_velr_query_control_cancel velr_query_control_cancel;
+	fn_velr_query_control_free velr_query_control_free;
+	fn_velr_exec_start_with_control velr_exec_start_with_control;
+	fn_velr_exec_one_with_control velr_exec_one_with_control;
+	fn_velr_run_with_control velr_run_with_control;
+	fn_velr_tx_exec_start_with_control velr_tx_exec_start_with_control;
+	fn_velr_tx_run_with_control velr_tx_run_with_control;
 	fn_velr_exec_start velr_exec_start;
 	fn_velr_exec_start_with_options velr_exec_start_with_options;
 	fn_velr_run velr_run;
@@ -466,6 +485,14 @@ static int velr_go_api_load(velr_api *api, const char *path) {
 	VELR_GO_LOAD(velr_explain_trace_compact_len);
 	VELR_GO_LOAD(velr_explain_trace_compact_write);
 	VELR_GO_LOAD(velr_explain_trace_compact_malloc);
+	api->velr_query_control_new = (fn_velr_query_control_new)velr_go_symbol(api->handle, "velr_query_control_new");
+	api->velr_query_control_cancel = (fn_velr_query_control_cancel)velr_go_symbol(api->handle, "velr_query_control_cancel");
+	api->velr_query_control_free = (fn_velr_query_control_free)velr_go_symbol(api->handle, "velr_query_control_free");
+	api->velr_exec_start_with_control = (fn_velr_exec_start_with_control)velr_go_symbol(api->handle, "velr_exec_start_with_control");
+	api->velr_exec_one_with_control = (fn_velr_exec_one_with_control)velr_go_symbol(api->handle, "velr_exec_one_with_control");
+	api->velr_run_with_control = (fn_velr_run_with_control)velr_go_symbol(api->handle, "velr_run_with_control");
+	api->velr_tx_exec_start_with_control = (fn_velr_tx_exec_start_with_control)velr_go_symbol(api->handle, "velr_tx_exec_start_with_control");
+	api->velr_tx_run_with_control = (fn_velr_tx_run_with_control)velr_go_symbol(api->handle, "velr_tx_run_with_control");
 	return 0;
 }
 
@@ -501,6 +528,24 @@ static void velr_go_migration_report_clear(velr_api *api, velr_migration_report 
 static velr_code velr_go_register_vector_embedder(velr_api *api, velr_db *db, velr_strview name, uintptr_t user_data, char **err) {
 	return api->velr_register_vector_embedder(db, name, velrGoVectorEmbedder, (void*)user_data, velrGoVectorEmbedderFree, err);
 }
+static int velr_go_has_query_control(const velr_api *api) {
+	return api->velr_query_control_new &&
+		api->velr_query_control_cancel &&
+		api->velr_query_control_free &&
+		api->velr_exec_start_with_control &&
+		api->velr_exec_one_with_control &&
+		api->velr_run_with_control &&
+		api->velr_tx_exec_start_with_control &&
+		api->velr_tx_run_with_control;
+}
+static velr_query_control* velr_go_query_control_new(velr_api *api, uint64_t timeout_ns) { return api->velr_query_control_new(timeout_ns); }
+static void velr_go_query_control_cancel(velr_api *api, const velr_query_control *control) { api->velr_query_control_cancel(control); }
+static void velr_go_query_control_free(velr_api *api, velr_query_control *control) { api->velr_query_control_free(control); }
+static velr_code velr_go_exec_start_with_control(velr_api *api, velr_db *db, const char *cypher, const velr_query_options *opts, const velr_query_control *control, velr_stream **out, char **err) { return api->velr_exec_start_with_control(db, cypher, opts, control, out, err); }
+static velr_code velr_go_exec_one_with_control(velr_api *api, velr_db *db, const char *cypher, const velr_query_options *opts, const velr_query_control *control, velr_table **out, char **err) { return api->velr_exec_one_with_control(db, cypher, opts, control, out, err); }
+static velr_code velr_go_run_with_control(velr_api *api, velr_db *db, const char *cypher, const velr_query_options *opts, const velr_query_control *control, char **err) { return api->velr_run_with_control(db, cypher, opts, control, err); }
+static velr_code velr_go_tx_exec_start_with_control(velr_api *api, velr_tx *db, const char *cypher, const velr_query_options *opts, const velr_query_control *control, velr_stream_tx **out, char **err) { return api->velr_tx_exec_start_with_control(db, cypher, opts, control, out, err); }
+static velr_code velr_go_tx_run_with_control(velr_api *api, velr_tx *db, const char *cypher, const velr_query_options *opts, const velr_query_control *control, char **err) { return api->velr_tx_run_with_control(db, cypher, opts, control, err); }
 static velr_code velr_go_exec_start(velr_api *api, velr_db *db, const char *cypher, velr_stream **out, char **err) { return api->velr_exec_start(db, cypher, out, err); }
 static velr_code velr_go_exec_start_with_options(velr_api *api, velr_db *db, const char *cypher, const velr_query_options *opts, velr_stream **out, char **err) { return api->velr_exec_start_with_options(db, cypher, opts, out, err); }
 static velr_code velr_go_run(velr_api *api, velr_db *db, const char *cypher, char **err) { return api->velr_run(db, cypher, err); }
@@ -567,6 +612,7 @@ import "C"
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -582,14 +628,18 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
 const (
-	errArg   = int(C.VELR_GO_EARG)
-	errUTF   = int(C.VELR_GO_EUTF)
-	errState = int(C.VELR_GO_ESTATE)
-	errErr   = int(C.VELR_GO_EERR)
+	errArg       = int(C.VELR_GO_EARG)
+	errUTF       = int(C.VELR_GO_EUTF)
+	errState     = int(C.VELR_GO_ESTATE)
+	errErr       = int(C.VELR_GO_EERR)
+	errCancelled = int(C.VELR_GO_ECANCELLED)
+	errDeadline  = int(C.VELR_GO_EDEADLINE)
 )
 
 // Error is returned by Velr runtime and driver operations.
@@ -599,8 +649,7 @@ const (
 // numeric operation status, separate from the query category. Use errors.As
 // to inspect an Error returned by query execution or result iteration.
 // Query categories include SyntaxError, TypeError, ArgumentError, EntityNotFound,
-// ConstraintVerificationFailed, SemanticError, ParameterMissing, ProcedureNotFound,
-// and ArithmeticError.
+// ConstraintVerificationFailed, SemanticError, ParameterMissing, and ArithmeticError.
 type Error struct {
 	// Code is a numeric operation status, separate from the Cypher error category.
 	Code int
@@ -615,6 +664,13 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("velr error (code %d)", e.Code)
 	}
 	return fmt.Sprintf("velr error (code %d): %s", e.Code, e.Message)
+}
+
+// Is reports whether a stopped query matches context.Canceled or
+// context.DeadlineExceeded. Use errors.Is to check either outcome.
+func (e *Error) Is(target error) bool {
+	return (e.Code == errCancelled && target == context.Canceled) ||
+		(e.Code == errDeadline && target == context.DeadlineExceeded)
 }
 
 func newError(code int, message string) error {
@@ -671,12 +727,16 @@ func resolveRuntimePath() (string, error) {
 		}
 	}
 
-	if path := resolveBundledRuntime(); path != "" {
+	path, bundledErr := resolveBundledRuntime()
+	if path != "" {
 		return path, nil
 	}
 
 	if path := resolveLocalRuntime(); path != "" {
 		return path, nil
+	}
+	if bundledErr != nil {
+		return "", bundledErr
 	}
 
 	return "", fmt.Errorf(
@@ -729,43 +789,24 @@ func currentRuntimePlatform() (runtimePlatform, bool) {
 	}
 }
 
-func resolveBundledRuntime() string {
-	platform, ok := currentRuntimePlatform()
-	if !ok {
-		return ""
-	}
-
-	for _, name := range platform.names {
-		embeddedPath := filepath.ToSlash(filepath.Join("runtime", platform.packageDir, "prebuilt", name))
-		bytes, err := embeddedRuntime.ReadFile(embeddedPath)
-		if err != nil {
-			continue
-		}
-		path, err := materializeRuntime(bytes, name)
-		if err == nil {
-			return path
-		}
-	}
-	return ""
-}
-
 func materializeRuntime(runtimeBytes []byte, filename string) (string, error) {
-	base, err := runtimeCacheDir()
+	base := runtimeCacheDir()
+	path, err := materializeRuntimeInCacheDir(runtimeBytes, filename, base)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("extract bundled Velr runtime to %q: %w; set VELR_CACHE_DIR to a writable directory or VELR_RUNTIME_PATH to an existing native library", base, err)
 	}
-	return materializeRuntimeInCacheDir(runtimeBytes, filename, base)
+	return path, nil
 }
 
-func runtimeCacheDir() (string, error) {
+func runtimeCacheDir() string {
 	if base := os.Getenv("VELR_CACHE_DIR"); base != "" {
-		return base, nil
+		return base
 	}
 	base, err := os.UserCacheDir()
 	if err != nil || base == "" {
 		base = os.TempDir()
 	}
-	return base, nil
+	return base
 }
 
 func materializeRuntimeInCacheDir(runtimeBytes []byte, filename string, base string) (string, error) {
@@ -776,10 +817,9 @@ func materializeRuntimeInCacheDir(runtimeBytes []byte, filename string, base str
 		return "", err
 	}
 	path := filepath.Join(dir, filename)
-	if runtimeFileMatches(path, runtimeBytes) {
+	if runtimeFileMatches(path, sum) {
 		return path, nil
 	}
-	_ = os.Remove(path)
 
 	tmp, err := os.CreateTemp(dir, filename+".tmp-*")
 	if err != nil {
@@ -805,26 +845,33 @@ func materializeRuntimeInCacheDir(runtimeBytes []byte, filename string, base str
 		_ = os.Remove(tmpName)
 		return "", err
 	}
-	if runtimeFileMatches(path, runtimeBytes) {
+	if runtimeFileMatches(path, sum) {
 		_ = os.Remove(tmpName)
 		return path, nil
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
-		if runtimeFileMatches(path, runtimeBytes) {
+		if runtimeFileMatches(path, sum) {
 			return path, nil
 		}
 		return "", err
 	}
-	if !runtimeFileMatches(path, runtimeBytes) {
+	if !runtimeFileMatches(path, sum) {
 		return "", fmt.Errorf("materialized Velr runtime %s failed content verification", path)
 	}
 	return path, nil
 }
 
-func runtimeFileMatches(path string, expected []byte) bool {
-	existing, err := os.ReadFile(path)
-	return err == nil && bytes.Equal(existing, expected)
+func runtimeFileMatches(path string, expected [sha256.Size]byte) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	_, err = io.Copy(hash, file)
+	return err == nil && bytes.Equal(hash.Sum(nil), expected[:])
 }
 
 func resolveLocalRuntime() string {
@@ -963,6 +1010,86 @@ func (rt *nativeRuntime) rcToErr(rc C.velr_code, errPtr *C.char) error {
 	return newError(code, rt.takeErr(errPtr))
 }
 
+// nativeQueryControl keeps context cancellation active for all live result
+// handles. The native stream and tables own their own copies of the control.
+type nativeQueryControl struct {
+	rt   *nativeRuntime
+	ptr  *C.velr_query_control
+	ctx  context.Context
+	refs atomic.Int32
+	stop func() bool
+	done chan struct{}
+}
+
+func (rt *nativeRuntime) newQueryControl(ctx context.Context) (*nativeQueryControl, error) {
+	if ctx == nil {
+		return nil, newError(errArg, "query context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	if ctx.Done() == nil && !hasDeadline {
+		return nil, nil
+	}
+	if !rt.supportsQueryControl() {
+		return nil, newError(errState, "loaded Velr runtime does not support query cancellation")
+	}
+	var timeout C.uint64_t
+	if hasDeadline {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+		timeout = C.uint64_t(remaining.Nanoseconds())
+	}
+	ptr := C.velr_go_query_control_new(&rt.api, timeout)
+	if ptr == nil {
+		return nil, newError(errErr, "could not create query cancellation control")
+	}
+	done := make(chan struct{})
+	control := &nativeQueryControl{rt: rt, ptr: ptr, ctx: ctx, done: done}
+	control.refs.Store(1)
+	control.stop = context.AfterFunc(ctx, func() {
+		// The engine enforces the deadline and reports it distinctly. A
+		// context canceled before its deadline sends a manual cancellation.
+		if ctx.Err() == context.Canceled {
+			C.velr_go_query_control_cancel(&rt.api, ptr)
+		}
+		close(done)
+	})
+	return control, nil
+}
+
+func (rt *nativeRuntime) supportsQueryControl() bool {
+	return C.velr_go_has_query_control(&rt.api) != 0
+}
+
+// Observe a manual cancellation even when the context callback has not yet run.
+// Deadline errors are reported separately by the engine's deadline.
+func (c *nativeQueryControl) signal() {
+	if c != nil && c.ctx.Err() == context.Canceled {
+		C.velr_go_query_control_cancel(&c.rt.api, c.ptr)
+	}
+}
+
+func (c *nativeQueryControl) retain() *nativeQueryControl {
+	if c != nil {
+		c.refs.Add(1)
+	}
+	return c
+}
+
+func (c *nativeQueryControl) release() {
+	if c == nil || c.refs.Add(-1) != 0 {
+		return
+	}
+	if !c.stop() {
+		<-c.done
+	}
+	C.velr_go_query_control_free(&c.rt.api, c.ptr)
+}
+
 func (rt *nativeRuntime) copyOwnedBytes(ptr *C.uint8_t, length C.size_t, what string) ([]byte, error) {
 	n := int(length)
 	if length > C.size_t(^uint(0)>>1) {
@@ -1009,14 +1136,20 @@ func optStrviewToString(v C.velr_strview, what string) (string, bool, error) {
 // Params is a map of named Cypher parameters.
 //
 // Query text references parameters as $name; map keys omit the leading $.
+// Values accept nil, bool, integers fitting int64, finite floats, strings,
+// json.RawMessage, nested lists/arrays, and maps with string keys. Structs must
+// be converted to maps or json.RawMessage. Invalid values return an error.
 type Params map[string]any
 
-// QueryOptions configures query execution.
+// QueryOptions configures query execution. Query methods accept at most one
+// QueryOptions value. Use WithParams and WithMaxResultRows to combine settings.
 type QueryOptions struct {
 	// HasMaxResultRows reports whether MaxResultRows should be applied.
 	HasMaxResultRows bool
 
-	// MaxResultRows caps emitted rows per result table when HasMaxResultRows is true.
+	// MaxResultRows caps emitted rows per table when HasMaxResultRows is true.
+	// It must be non-negative. Zero preserves columns without rows. A row cap
+	// does not cap execution time or replace an existing Cypher LIMIT.
 	MaxResultRows int
 
 	// Params contains named Cypher parameters for this query.
@@ -1028,7 +1161,9 @@ func WithParams(params Params) QueryOptions {
 	return QueryOptions{Params: params}
 }
 
-// MaxResultRows creates QueryOptions that cap emitted rows per result table.
+// MaxResultRows creates options with a per-table row cap. n must be
+// non-negative; invalid values fail when executing the query. Zero preserves
+// column metadata without rows. The cap does not bound execution time.
 func MaxResultRows(n int) QueryOptions {
 	return QueryOptions{HasMaxResultRows: true, MaxResultRows: n}
 }
@@ -1046,7 +1181,9 @@ func (opts QueryOptions) WithMaxResultRows(n int) QueryOptions {
 	return opts
 }
 
-// WithParam returns a copy of opts with one parameter set.
+// WithParam returns opts with one parameter set. The Params map is shared
+// with the original options when it was already non-nil; clone it before
+// calling if other code must retain the previous parameter values.
 func (opts QueryOptions) WithParam(name string, value any) QueryOptions {
 	if opts.Params == nil {
 		opts.Params = Params{}
@@ -1803,8 +1940,11 @@ type Cell struct {
 
 // Value converts the cell to a Go value.
 //
-// JSON cells are decoded into interface values. Use String for the raw UTF-8
-// representation when you do not want JSON parsing.
+// Null, bool, integer, double, and text cells become nil, bool, int64, float64,
+// and string. JSON cells use encoding/json default decoding, so JSON numbers
+// become float64 and large integers can lose precision. Invalid JSON is
+// returned as its string representation. Use Cell.Bytes with json.Decoder and
+// UseNumber for exact JSON integers, or AsProperty for typed graph values.
 func (c Cell) Value() any {
 	switch c.Type {
 	case Null:
@@ -1829,6 +1969,7 @@ func (c Cell) Value() any {
 }
 
 // AsBool converts a boolean cell to bool.
+// Other cell kinds return a conversion error.
 func (c Cell) AsBool() (bool, error) {
 	if c.Type != Bool {
 		return false, fmt.Errorf("cannot convert %s cell to bool", c.Type)
@@ -1837,6 +1978,7 @@ func (c Cell) AsBool() (bool, error) {
 }
 
 // AsInt64 converts an integer cell to int64.
+// Other cell kinds return a conversion error.
 func (c Cell) AsInt64() (int64, error) {
 	if c.Type != Int64 {
 		return 0, fmt.Errorf("cannot convert %s cell to int64", c.Type)
@@ -1845,6 +1987,7 @@ func (c Cell) AsInt64() (int64, error) {
 }
 
 // AsFloat64 converts a double cell to float64.
+// Other cell kinds return a conversion error.
 func (c Cell) AsFloat64() (float64, error) {
 	if c.Type != Double {
 		return 0, fmt.Errorf("cannot convert %s cell to float64", c.Type)
@@ -1853,6 +1996,7 @@ func (c Cell) AsFloat64() (float64, error) {
 }
 
 // AsString decodes text and JSON cells as UTF-8.
+// Other cell kinds return a conversion error.
 func (c Cell) AsString() (string, error) {
 	if c.Type != Text && c.Type != JSON {
 		return "", fmt.Errorf("cannot convert %s cell to string", c.Type)
@@ -1870,7 +2014,8 @@ func (c Cell) String() string {
 	}
 }
 
-// DecodeJSON decodes a JSON cell into out.
+// DecodeJSON decodes a JSON cell into a destination accepted by json.Unmarshal.
+// Non-JSON cells, invalid JSON, or incompatible destinations return an error.
 func (c Cell) DecodeJSON(out any) error {
 	if c.Type != JSON {
 		return fmt.Errorf("cannot decode %s cell as JSON", c.Type)
@@ -1878,7 +2023,11 @@ func (c Cell) DecodeJSON(out any) error {
 	return json.Unmarshal(c.Bytes, out)
 }
 
-// AssignTo assigns this cell to a destination pointer.
+// AssignTo assigns this cell to a non-nil destination pointer. Supported
+// targets are *any, *PropertyValue, *Node, *Relationship, *Path, *GeoJSON,
+// *bool, *int, *int64, *float64, *string, *[]byte, and *json.RawMessage. Scalar
+// conversions require matching cell kinds; *int uses Go integer conversion.
+// Invalid targets or incompatible kinds return an error.
 func (c Cell) AssignTo(dest any) error {
 	if dest == nil {
 		return fmt.Errorf("scan destination must be a non-nil pointer")
@@ -2000,7 +2149,9 @@ func (c Cell) AssignTo(dest any) error {
 	}
 }
 
-// Scan assigns a row of cells into destination pointers.
+// Scan assigns a row into destination pointers using Cell.AssignTo. The
+// destination count must match the column count. Invalid destinations, counts,
+// or incompatible value types return an error; earlier assignments may remain.
 func Scan(row []Cell, dest ...any) error {
 	if len(row) != len(dest) {
 		return fmt.Errorf("scan expected %d destinations for %d cells", len(row), len(dest))
@@ -2045,7 +2196,9 @@ func cellFromRaw(raw C.velr_cell) (Cell, error) {
 	}
 }
 
-// DB is a Velr database connection.
+// DB is a Velr database connection. Use it and its handles from one goroutine
+// at a time. Keep it open until its transactions, streams, tables, row cursors,
+// and explain traces have been explicitly closed.
 type DB struct {
 	rt     *nativeRuntime
 	mu     sync.Mutex
@@ -2059,9 +2212,7 @@ type CreateOptions struct {
 	// The default is an empty selection. A selected name applies across all
 	// relationship types and is fixed at creation.
 	//
-	// Eligible values include integers, floating-point numbers, and strings
-	// up to 128 UTF-8 bytes. Read and write all values through ordinary Cypher
-	// queries.
+	// Read and write all values through ordinary Cypher queries.
 	InlineEdgeProperties []string
 }
 
@@ -2121,12 +2272,17 @@ func create(path *string, options CreateOptions) (*DB, error) {
 	return newDB(rt, out), nil
 }
 
-// OpenInMemory opens an in-memory Velr database.
+// OpenInMemory opens an ephemeral database. Fulltext and vector indexes
+// require a file-backed database and cannot be created here. Close the returned
+// connection after closing its results. Initialization failures return *Error.
 func OpenInMemory() (*DB, error) {
 	return open(nil)
 }
 
-// Open opens a file-backed Velr database for reading and writing.
+// Open opens or creates a file-backed database for reading and writing.
+// path must not contain NUL. Opening never migrates older supported databases
+// automatically; use NeedsMigration and Migrate before graph queries or
+// transactions. Close the connection after its results. Open failures return an error.
 func Open(path string) (*DB, error) {
 	return open(&path)
 }
@@ -2158,7 +2314,12 @@ func open(path *string) (*DB, error) {
 	return newDB(rt, out), nil
 }
 
-// OpenReadonly opens an existing database in read-only mode.
+// OpenReadonly opens an existing supported database for reads, without
+// creating, initializing, migrating, or repairing it. path must not contain
+// NUL. Missing files and unsupported schemas return an error. Close the
+// returned connection after its results.
+// Migrate supported older databases on a writable connection, then reopen
+// read-only connections before querying.
 func OpenReadonly(path string) (*DB, error) {
 	rt, err := runtimeAPI()
 	if err != nil {
@@ -2313,7 +2474,11 @@ type MigrationReport struct {
 	Steps []string
 }
 
-// Migrate explicitly migrates the opened database to the current schema.
+// Migrate explicitly migrates a writable database to the current schema.
+// Call from maintenance code outside an active transaction. It returns the
+// before/after versions, status, and steps, or an error if migration fails.
+// Migrate supported older databases before graph queries or transactions;
+// reopen read-only connections after another connection migrates the file.
 func (db *DB) Migrate() (MigrationReport, error) {
 	ptr, err := db.dbPtr()
 	if err != nil {
@@ -2350,7 +2515,8 @@ func (db *DB) Migrate() (MigrationReport, error) {
 	}, nil
 }
 
-// Vacuum compacts a writable, current-schema database file with Velr's maintenance vacuum.
+// Vacuum compacts a writable current-schema database file. Call outside an
+// active transaction; unmet prerequisites or maintenance failures return an error.
 func (db *DB) Vacuum() error {
 	ptr, err := db.dbPtr()
 	if err != nil {
@@ -2369,6 +2535,10 @@ func (db *DB) Vacuum() error {
 // Stored-vector indexes, such as CREATE VECTOR INDEX ... ON (n.embedding), do
 // not use a registered embedder. They index the vector/list property directly
 // and vector queries pass a numeric vector/list.
+//
+// The callback is retained until replacement or connection close. It must not
+// call the same connection. Return one finite vector per input in input order
+// and with the requested dimensions; callback errors fail the requesting query.
 func (db *DB) RegisterVectorEmbedder(name string, embedder VectorEmbedder) error {
 	ptr, err := db.dbPtr()
 	if err != nil {
@@ -2401,10 +2571,24 @@ func (db *DB) RegisterVectorEmbedder(name string, embedder VectorEmbedder) error
 // Stream.NextTable or Rows.Next while consuming the results. Close the stream
 // when finished.
 func (db *DB) Exec(cypher string, options ...QueryOptions) (*Stream, error) {
+	return db.ExecContext(context.Background(), cypher, options...)
+}
+
+// ExecContext executes Cypher and returns a result stream.
+// The context covers execution and table and row reads. Close the stream and
+// its results when finished. Check interruptions with errors.Is and
+// context.Canceled or context.DeadlineExceeded.
+func (db *DB) ExecContext(ctx context.Context, cypher string, options ...QueryOptions) (*Stream, error) {
 	ptr, err := db.dbPtr()
 	if err != nil {
 		return nil, err
 	}
+	control, err := db.rt.newQueryControl(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer control.release()
+
 	ccypher, free, err := cString(cypher, "openCypher")
 	if err != nil {
 		return nil, err
@@ -2417,7 +2601,7 @@ func (db *DB) Exec(cypher string, options ...QueryOptions) (*Stream, error) {
 	}
 
 	var rawOpts *rawQueryOptions
-	if hasOpts {
+	if hasOpts || control != nil {
 		rawOpts, err = db.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return nil, err
@@ -2427,7 +2611,10 @@ func (db *DB) Exec(cypher string, options ...QueryOptions) (*Stream, error) {
 
 	var out *C.velr_stream
 	var errPtr *C.char
-	if hasOpts {
+	if control != nil {
+		control.signal()
+		err = db.rt.rcToErr(C.velr_go_exec_start_with_control(&db.rt.api, ptr, ccypher, &rawOpts.raw, control.ptr, &out, &errPtr), errPtr)
+	} else if hasOpts {
 		err = db.rt.rcToErr(C.velr_go_exec_start_with_options(&db.rt.api, ptr, ccypher, &rawOpts.raw, &out, &errPtr), errPtr)
 	} else {
 		err = db.rt.rcToErr(C.velr_go_exec_start(&db.rt.api, ptr, ccypher, &out, &errPtr), errPtr)
@@ -2438,15 +2625,30 @@ func (db *DB) Exec(cypher string, options ...QueryOptions) (*Stream, error) {
 	if out == nil {
 		return nil, newError(errErr, "velr_exec_start returned null stream")
 	}
-	return newStream(db.rt, out), nil
+	return newStream(db.rt, out, control.retain()), nil
 }
 
-// ExecOne executes Cypher and requires exactly one result table.
+// ExecOne executes Cypher and requires exactly one result table. Zero or
+// multiple result tables return an error. Close the table after reading it and
+// before closing its connection. Query errors can occur during row reads.
 func (db *DB) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
+	return db.ExecOneContext(context.Background(), cypher, options...)
+}
+
+// ExecOneContext executes Cypher and returns exactly one result table.
+// The context covers execution and row reads. Close the table when finished.
+// Check interruptions with errors.Is and context.Canceled or context.DeadlineExceeded.
+func (db *DB) ExecOneContext(ctx context.Context, cypher string, options ...QueryOptions) (*Table, error) {
 	ptr, err := db.dbPtr()
 	if err != nil {
 		return nil, err
 	}
+	control, err := db.rt.newQueryControl(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer control.release()
+
 	ccypher, free, err := cString(cypher, "openCypher")
 	if err != nil {
 		return nil, err
@@ -2459,7 +2661,7 @@ func (db *DB) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
 	}
 
 	var rawOpts *rawQueryOptions
-	if hasOpts {
+	if hasOpts || control != nil {
 		rawOpts, err = db.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return nil, err
@@ -2469,7 +2671,10 @@ func (db *DB) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
 
 	var out *C.velr_table
 	var errPtr *C.char
-	if hasOpts {
+	if control != nil {
+		control.signal()
+		err = db.rt.rcToErr(C.velr_go_exec_one_with_control(&db.rt.api, ptr, ccypher, &rawOpts.raw, control.ptr, &out, &errPtr), errPtr)
+	} else if hasOpts {
 		err = db.rt.rcToErr(C.velr_go_exec_one_with_options(&db.rt.api, ptr, ccypher, &rawOpts.raw, &out, &errPtr), errPtr)
 	} else {
 		err = db.rt.rcToErr(C.velr_go_exec_one(&db.rt.api, ptr, ccypher, &out, &errPtr), errPtr)
@@ -2480,15 +2685,27 @@ func (db *DB) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
 	if out == nil {
 		return nil, newError(errErr, "velr_exec_one returned null table")
 	}
-	return newTable(db.rt, out), nil
+	return newTable(db.rt, out, control.retain()), nil
 }
 
 // Run executes Cypher and discards all result tables.
 func (db *DB) Run(cypher string, options ...QueryOptions) error {
+	return db.RunContext(context.Background(), cypher, options...)
+}
+
+// RunContext executes Cypher and discards the results.
+// An interrupted query reports context.Canceled or context.DeadlineExceeded via errors.Is.
+func (db *DB) RunContext(ctx context.Context, cypher string, options ...QueryOptions) error {
 	ptr, err := db.dbPtr()
 	if err != nil {
 		return err
 	}
+	control, err := db.rt.newQueryControl(ctx)
+	if err != nil {
+		return err
+	}
+	defer control.release()
+
 	ccypher, free, err := cString(cypher, "openCypher")
 	if err != nil {
 		return err
@@ -2501,7 +2718,7 @@ func (db *DB) Run(cypher string, options ...QueryOptions) error {
 	}
 
 	var rawOpts *rawQueryOptions
-	if hasOpts {
+	if hasOpts || control != nil {
 		rawOpts, err = db.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return err
@@ -2510,7 +2727,10 @@ func (db *DB) Run(cypher string, options ...QueryOptions) error {
 	}
 
 	var errPtr *C.char
-	if hasOpts {
+	if control != nil {
+		control.signal()
+		err = db.rt.rcToErr(C.velr_go_run_with_control(&db.rt.api, ptr, ccypher, &rawOpts.raw, control.ptr, &errPtr), errPtr)
+	} else if hasOpts {
 		err = db.rt.rcToErr(C.velr_go_run_with_options(&db.rt.api, ptr, ccypher, &rawOpts.raw, &errPtr), errPtr)
 	} else {
 		err = db.rt.rcToErr(C.velr_go_run(&db.rt.api, ptr, ccypher, &errPtr), errPtr)
@@ -2519,8 +2739,16 @@ func (db *DB) Run(cypher string, options ...QueryOptions) error {
 }
 
 // Query executes Cypher and converts the single result table to row objects.
+// Use unique result aliases; Cypher rejects duplicate result column names.
 func (db *DB) Query(cypher string, options ...QueryOptions) ([]map[string]any, error) {
-	table, err := db.ExecOne(cypher, options...)
+	return db.QueryContext(context.Background(), cypher, options...)
+}
+
+// QueryContext executes Cypher and converts a single table to row objects.
+// The context covers execution and all row reads.
+// Check interruptions with errors.Is and context.Canceled or context.DeadlineExceeded.
+func (db *DB) QueryContext(ctx context.Context, cypher string, options ...QueryOptions) ([]map[string]any, error) {
+	table, err := db.ExecOneContext(ctx, cypher, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -2579,7 +2807,10 @@ func (db *DB) BindArrow(logical string, columns []ArrowColumn) error {
 	return db.rt.bindArrow(ptr, nil, logical, columns)
 }
 
-// BindArrowChunks binds chunked Arrow C Data Interface columns under a logical table name.
+// BindArrowChunks binds chunked C Data Interface columns as a logical table.
+// ArrowArray release ownership transfers to Velr on success or failure of the
+// native call; do not reuse or release those arrays afterwards. Schemas and
+// names are borrowed only during the call. Invalid arguments return an error.
 func (db *DB) BindArrowChunks(logical string, columns []ArrowColumnChunks) error {
 	ptr, err := db.dbPtr()
 	if err != nil {
@@ -2822,7 +3053,10 @@ func (db *DB) BeginTx() (*Tx, error) {
 	return newTx(db.rt, out), nil
 }
 
-// Transaction runs fn inside a transaction, committing on nil error and rolling back otherwise.
+// Transaction runs fn, committing on nil and rolling back on an error or
+// panic. The callback must not commit or roll back the transaction itself. Its
+// result handles must be consumed and closed before it returns. Callback and
+// commit errors are returned; a panic propagates after rollback is attempted.
 func (db *DB) Transaction(fn func(*Tx) error) error {
 	tx, err := db.BeginTx()
 	if err != nil {
@@ -2885,16 +3119,19 @@ func (db *DB) explain(ptr *C.velr_db, cypher string, analyze bool) (*ExplainTrac
 	return newExplainTrace(db.rt, out), nil
 }
 
-// Stream is a streaming query result.
+// Stream is a streaming query result. Keep its connection open, close each
+// produced table and its cursors, then close the stream. Execution can fail
+// while advancing tables or fetching rows.
 type Stream struct {
-	rt     *nativeRuntime
-	mu     sync.Mutex
-	ptr    *C.velr_stream
-	closed bool
+	control *nativeQueryControl
+	rt      *nativeRuntime
+	mu      sync.Mutex
+	ptr     *C.velr_stream
+	closed  bool
 }
 
-func newStream(rt *nativeRuntime, ptr *C.velr_stream) *Stream {
-	stream := &Stream{rt: rt, ptr: ptr}
+func newStream(rt *nativeRuntime, ptr *C.velr_stream, control *nativeQueryControl) *Stream {
+	stream := &Stream{control: control, rt: rt, ptr: ptr}
 	runtime.SetFinalizer(stream, (*Stream).finalize)
 	return stream
 }
@@ -2922,6 +3159,7 @@ func (s *Stream) NextTable() (*Table, error) {
 	var out *C.velr_table
 	var has C.int
 	var errPtr *C.char
+	s.control.signal()
 	if err := s.rt.rcToErr(C.velr_go_stream_next_table(&s.rt.api, ptr, &out, &has, &errPtr), errPtr); err != nil {
 		return nil, err
 	}
@@ -2931,7 +3169,7 @@ func (s *Stream) NextTable() (*Table, error) {
 	if out == nil {
 		return nil, newError(errErr, "stream returned null table")
 	}
-	return newTable(s.rt, out), nil
+	return newTable(s.rt, out, s.control.retain()), nil
 }
 
 // Close releases the stream. It is safe to call more than once.
@@ -2947,11 +3185,15 @@ func (s *Stream) Close() error {
 	s.mu.Unlock()
 	runtime.SetFinalizer(s, nil)
 	C.velr_go_exec_close(&s.rt.api, ptr)
+	s.control.release()
 	return nil
 }
 
-// Table is one result table.
+// Table is one result table. Keep its producing connection, transaction,
+// and stream alive while using it. Close row cursors before the table, then
+// close the table explicitly. Collected cells and Go values own their data.
 type Table struct {
+	control     *nativeQueryControl
 	rt          *nativeRuntime
 	mu          sync.Mutex
 	ptr         *C.velr_table
@@ -2959,8 +3201,8 @@ type Table struct {
 	columnNames []string
 }
 
-func newTable(rt *nativeRuntime, ptr *C.velr_table) *Table {
-	table := &Table{rt: rt, ptr: ptr}
+func newTable(rt *nativeRuntime, ptr *C.velr_table, control *nativeQueryControl) *Table {
+	table := &Table{control: control, rt: rt, ptr: ptr}
 	runtime.SetFinalizer(table, (*Table).finalize)
 	return table
 }
@@ -2991,6 +3233,7 @@ func (t *Table) Close() error {
 	t.mu.Unlock()
 	runtime.SetFinalizer(t, nil)
 	C.velr_go_table_close(&t.rt.api, ptr)
+	t.control.release()
 	return nil
 }
 
@@ -3039,7 +3282,9 @@ func (t *Table) ColumnNames() ([]string, error) {
 	return names, nil
 }
 
-// Rows opens a streaming row cursor for the table.
+// Rows opens a cursor. Keep the table and its producing handles open until
+// the cursor closes. Fetch errors can occur after this call succeeds; close
+// the cursor on success, error, and early exit.
 func (t *Table) Rows() (*Rows, error) {
 	ptr, err := t.tablePtr()
 	if err != nil {
@@ -3048,13 +3293,14 @@ func (t *Table) Rows() (*Rows, error) {
 	count := int(C.velr_go_table_column_count(&t.rt.api, ptr))
 	var out *C.velr_rows
 	var errPtr *C.char
+	t.control.signal()
 	if err := t.rt.rcToErr(C.velr_go_table_rows_open(&t.rt.api, ptr, &out, &errPtr), errPtr); err != nil {
 		return nil, err
 	}
 	if out == nil {
 		return nil, newError(errErr, "velr_table_rows_open returned null rows")
 	}
-	return newRows(t.rt, out, count), nil
+	return newRows(t.rt, out, count, t.control.retain()), nil
 }
 
 // ForEachRow visits every row and closes the row cursor afterwards.
@@ -3089,7 +3335,10 @@ func (t *Table) Collect() ([][]Cell, error) {
 	return out, err
 }
 
-// ToObjects converts all rows to maps keyed by column name.
+// ToObjects collects all rows in memory as maps keyed by column name.
+// Use unique result aliases; Cypher rejects duplicate result column names.
+// Values follow Cell.Value, including float64 JSON numbers. The temporary row
+// cursor closes on success and failure; the caller still owns the table.
 func (t *Table) ToObjects() ([]map[string]any, error) {
 	names, err := t.ColumnNames()
 	if err != nil {
@@ -3111,8 +3360,22 @@ func (t *Table) ToObjects() ([]map[string]any, error) {
 	return out, err
 }
 
-// ToArrowIPC exports the table as Arrow IPC file bytes.
+// ToArrowIPC exports the table as owned Arrow IPC file/Feather v2 bytes.
+// The returned slice remains usable after the table and its parent handles
+// close. Export can materialize the entire result and use memory proportional
+// to its size.
+//
+// Column types are inferred per result. Numeric columns may be integers or
+// floating-point; incompatible mixed value kinds are rendered as strings.
+// Cypher lists, maps, nodes, relationships, and paths become JSON strings in
+// Arrow UTF-8 columns rather than nested Arrow arrays. Null values remain
+// null; empty/all-null columns use UTF-8 strings. Inspect the exported schema
+// before choosing application data types.
+//
+// Returns an error for a closed table, row-reading, conversion, or IPC export
+// failure. The loaded runtime must support Arrow IPC export.
 func (t *Table) ToArrowIPC() ([]byte, error) {
+	defer runtime.KeepAlive(t)
 	ptr, err := t.tablePtr()
 	if err != nil {
 		return nil, err
@@ -3120,6 +3383,7 @@ func (t *Table) ToArrowIPC() ([]byte, error) {
 	var out *C.uint8_t
 	var length C.size_t
 	var errPtr *C.char
+	t.control.signal()
 	if err := t.rt.rcToErr(C.velr_go_table_ipc_file_malloc(&t.rt.api, ptr, &out, &length, &errPtr), errPtr); err != nil {
 		return nil, err
 	}
@@ -3128,6 +3392,7 @@ func (t *Table) ToArrowIPC() ([]byte, error) {
 
 // Rows is a streaming row cursor.
 type Rows struct {
+	control     *nativeQueryControl
 	rt          *nativeRuntime
 	mu          sync.Mutex
 	ptr         *C.velr_rows
@@ -3135,8 +3400,8 @@ type Rows struct {
 	columnCount int
 }
 
-func newRows(rt *nativeRuntime, ptr *C.velr_rows, columnCount int) *Rows {
-	rows := &Rows{rt: rt, ptr: ptr, columnCount: columnCount}
+func newRows(rt *nativeRuntime, ptr *C.velr_rows, columnCount int, control *nativeQueryControl) *Rows {
+	rows := &Rows{control: control, rt: rt, ptr: ptr, columnCount: columnCount}
 	runtime.SetFinalizer(rows, (*Rows).finalize)
 	return rows
 }
@@ -3157,6 +3422,7 @@ func (r *Rows) rowsPtr() (*C.velr_rows, error) {
 // Next returns the next row, or nil at EOF.
 // It returns an *Error if query execution fails while fetching the row.
 func (r *Rows) Next() ([]Cell, error) {
+	defer runtime.KeepAlive(r)
 	ptr, err := r.rowsPtr()
 	if err != nil {
 		return nil, err
@@ -3169,6 +3435,7 @@ func (r *Rows) Next() ([]Cell, error) {
 		buf = make([]C.velr_cell, r.columnCount)
 		bufPtr = &buf[0]
 	}
+	r.control.signal()
 	rc := C.velr_go_rows_next(&r.rt.api, ptr, bufPtr, C.size_t(r.columnCount), &written, &errPtr)
 	if rc == 0 {
 		return nil, nil
@@ -3220,6 +3487,7 @@ func (r *Rows) Close() error {
 	r.mu.Unlock()
 	runtime.SetFinalizer(r, nil)
 	C.velr_go_rows_close(&r.rt.api, ptr)
+	r.control.release()
 	return nil
 }
 
@@ -3257,10 +3525,25 @@ func (tx *Tx) txPtr() (*C.velr_tx, error) {
 // TxStream.NextTable or Rows.Next while consuming the results. Close the stream
 // when finished.
 func (tx *Tx) Exec(cypher string, options ...QueryOptions) (*TxStream, error) {
+	return tx.ExecContext(context.Background(), cypher, options...)
+}
+
+// ExecContext executes Cypher inside the transaction and returns a result stream.
+// The context covers execution and table and row reads. Close the stream and
+// its results when finished. Check interruptions with errors.Is and
+// context.Canceled or context.DeadlineExceeded.
+// If cancellation ends the transaction, start a new one before running more queries.
+func (tx *Tx) ExecContext(ctx context.Context, cypher string, options ...QueryOptions) (*TxStream, error) {
 	ptr, err := tx.txPtr()
 	if err != nil {
 		return nil, err
 	}
+	control, err := tx.rt.newQueryControl(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer control.release()
+
 	ccypher, free, err := cString(cypher, "openCypher")
 	if err != nil {
 		return nil, err
@@ -3272,7 +3555,7 @@ func (tx *Tx) Exec(cypher string, options ...QueryOptions) (*TxStream, error) {
 		return nil, err
 	}
 	var rawOpts *rawQueryOptions
-	if hasOpts {
+	if hasOpts || control != nil {
 		rawOpts, err = tx.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return nil, err
@@ -3282,7 +3565,10 @@ func (tx *Tx) Exec(cypher string, options ...QueryOptions) (*TxStream, error) {
 
 	var out *C.velr_stream_tx
 	var errPtr *C.char
-	if hasOpts {
+	if control != nil {
+		control.signal()
+		err = tx.rt.rcToErr(C.velr_go_tx_exec_start_with_control(&tx.rt.api, ptr, ccypher, &rawOpts.raw, control.ptr, &out, &errPtr), errPtr)
+	} else if hasOpts {
 		err = tx.rt.rcToErr(C.velr_go_tx_exec_start_with_options(&tx.rt.api, ptr, ccypher, &rawOpts.raw, &out, &errPtr), errPtr)
 	} else {
 		err = tx.rt.rcToErr(C.velr_go_tx_exec_start(&tx.rt.api, ptr, ccypher, &out, &errPtr), errPtr)
@@ -3293,12 +3579,21 @@ func (tx *Tx) Exec(cypher string, options ...QueryOptions) (*TxStream, error) {
 	if out == nil {
 		return nil, newError(errErr, "velr_tx_exec_start returned null stream")
 	}
-	return newTxStream(tx.rt, out), nil
+	return newTxStream(tx.rt, out, control.retain()), nil
 }
 
-// ExecOne executes Cypher inside the transaction and requires exactly one table.
+// ExecOne executes Cypher inside the transaction and requires exactly one
+// table. Zero or multiple tables return an error. Read and close the returned
+// table before ending the transaction; row reads can also return query errors.
 func (tx *Tx) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
-	stream, err := tx.Exec(cypher, options...)
+	return tx.ExecOneContext(context.Background(), cypher, options...)
+}
+
+// ExecOneContext executes Cypher inside the transaction and returns exactly one result table.
+// The context covers execution and row reads. Close the table when finished.
+// Check interruptions with errors.Is and context.Canceled or context.DeadlineExceeded.
+func (tx *Tx) ExecOneContext(ctx context.Context, cypher string, options ...QueryOptions) (*Table, error) {
+	stream, err := tx.ExecContext(ctx, cypher, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -3325,10 +3620,23 @@ func (tx *Tx) ExecOne(cypher string, options ...QueryOptions) (*Table, error) {
 
 // Run executes Cypher inside the transaction and discards result tables.
 func (tx *Tx) Run(cypher string, options ...QueryOptions) error {
+	return tx.RunContext(context.Background(), cypher, options...)
+}
+
+// RunContext executes Cypher inside the transaction and discards the results.
+// An interrupted query reports context.Canceled or context.DeadlineExceeded via errors.Is.
+// If cancellation ends the transaction, start a new one before running more queries.
+func (tx *Tx) RunContext(ctx context.Context, cypher string, options ...QueryOptions) error {
 	ptr, err := tx.txPtr()
 	if err != nil {
 		return err
 	}
+	control, err := tx.rt.newQueryControl(ctx)
+	if err != nil {
+		return err
+	}
+	defer control.release()
+
 	ccypher, free, err := cString(cypher, "openCypher")
 	if err != nil {
 		return err
@@ -3341,7 +3649,7 @@ func (tx *Tx) Run(cypher string, options ...QueryOptions) error {
 	}
 
 	var rawOpts *rawQueryOptions
-	if hasOpts {
+	if hasOpts || control != nil {
 		rawOpts, err = tx.rt.makeQueryOptions(opts, cypher)
 		if err != nil {
 			return err
@@ -3350,7 +3658,10 @@ func (tx *Tx) Run(cypher string, options ...QueryOptions) error {
 	}
 
 	var errPtr *C.char
-	if hasOpts {
+	if control != nil {
+		control.signal()
+		err = tx.rt.rcToErr(C.velr_go_tx_run_with_control(&tx.rt.api, ptr, ccypher, &rawOpts.raw, control.ptr, &errPtr), errPtr)
+	} else if hasOpts {
 		err = tx.rt.rcToErr(C.velr_go_tx_run_with_options(&tx.rt.api, ptr, ccypher, &rawOpts.raw, &errPtr), errPtr)
 	} else {
 		err = tx.rt.rcToErr(C.velr_go_tx_run(&tx.rt.api, ptr, ccypher, &errPtr), errPtr)
@@ -3359,8 +3670,16 @@ func (tx *Tx) Run(cypher string, options ...QueryOptions) error {
 }
 
 // Query executes Cypher inside the transaction and converts the single table to objects.
+// Use unique result aliases; Cypher rejects duplicate result column names.
 func (tx *Tx) Query(cypher string, options ...QueryOptions) ([]map[string]any, error) {
-	table, err := tx.ExecOne(cypher, options...)
+	return tx.QueryContext(context.Background(), cypher, options...)
+}
+
+// QueryContext executes Cypher and converts a single table to row objects.
+// The context covers execution and all row reads.
+// Check interruptions with errors.Is and context.Canceled or context.DeadlineExceeded.
+func (tx *Tx) QueryContext(ctx context.Context, cypher string, options ...QueryOptions) ([]map[string]any, error) {
+	table, err := tx.ExecOneContext(ctx, cypher, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -3406,7 +3725,10 @@ func (tx *Tx) BindArrowIPC(logical string, ipc []byte) error {
 	return tx.rt.rcToErr(C.velr_go_tx_bind_arrow_ipc(&tx.rt.api, ptr, clogical, (*C.uint8_t)(unsafe.Pointer(&ipc[0])), C.size_t(len(ipc)), &errPtr), errPtr)
 }
 
-// BindArrow binds Arrow C Data Interface columns inside the transaction.
+// BindArrow binds C Data Interface columns inside the transaction. Ownership
+// of every ArrowArray transfers on success or failure of the native call; do
+// not release or reuse arrays afterwards. Schemas and names are borrowed only
+// during the call. Query with UNWIND BIND('name') AS row.
 func (tx *Tx) BindArrow(logical string, columns []ArrowColumn) error {
 	ptr, err := tx.txPtr()
 	if err != nil {
@@ -3415,7 +3737,9 @@ func (tx *Tx) BindArrow(logical string, columns []ArrowColumn) error {
 	return tx.rt.bindArrow(nil, ptr, logical, columns)
 }
 
-// BindArrowChunks binds chunked Arrow C Data Interface columns inside the transaction.
+// BindArrowChunks binds chunked C Data Interface columns in the transaction.
+// Array release ownership transfers on success or failure of the native call;
+// schemas and names are borrowed during the call. Do not reuse released arrays.
 func (tx *Tx) BindArrowChunks(logical string, columns []ArrowColumnChunks) error {
 	ptr, err := tx.txPtr()
 	if err != nil {
@@ -3464,7 +3788,9 @@ func (tx *Tx) explain(ptr *C.velr_tx, cypher string, analyze bool) (*ExplainTrac
 	return newExplainTrace(tx.rt, out), nil
 }
 
-// Savepoint creates an unnamed scoped savepoint.
+// Savepoint creates an anonymous scoped savepoint. Release preserves changes
+// after it; Rollback discards them and releases it. Closing an active handle
+// also rolls back and releases it. Use before the transaction ends.
 func (tx *Tx) Savepoint() (*Savepoint, error) {
 	ptr, err := tx.txPtr()
 	if err != nil {
@@ -3481,7 +3807,10 @@ func (tx *Tx) Savepoint() (*Savepoint, error) {
 	return newSavepoint(tx.rt, out, "", nil), nil
 }
 
-// SavepointNamed creates a named transaction-owned savepoint.
+// SavepointNamed creates a named savepoint. Release it newest first;
+// RollbackTo retains the named target and discards newer named savepoints.
+// Closing its active handle rolls back and releases the savepoint, including
+// changes made since it was created. Commit releases surviving named savepoints.
 func (tx *Tx) SavepointNamed(name string) (*Savepoint, error) {
 	ptr, err := tx.txPtr()
 	if err != nil {
@@ -3638,14 +3967,15 @@ func (tx *Tx) forgetNamedSavepointsFrom(name string) {
 
 // TxStream is a streaming query result inside a transaction.
 type TxStream struct {
-	rt     *nativeRuntime
-	mu     sync.Mutex
-	ptr    *C.velr_stream_tx
-	closed bool
+	control *nativeQueryControl
+	rt      *nativeRuntime
+	mu      sync.Mutex
+	ptr     *C.velr_stream_tx
+	closed  bool
 }
 
-func newTxStream(rt *nativeRuntime, ptr *C.velr_stream_tx) *TxStream {
-	stream := &TxStream{rt: rt, ptr: ptr}
+func newTxStream(rt *nativeRuntime, ptr *C.velr_stream_tx, control *nativeQueryControl) *TxStream {
+	stream := &TxStream{control: control, rt: rt, ptr: ptr}
 	runtime.SetFinalizer(stream, (*TxStream).finalize)
 	return stream
 }
@@ -3673,6 +4003,7 @@ func (s *TxStream) NextTable() (*Table, error) {
 	var out *C.velr_table
 	var has C.int
 	var errPtr *C.char
+	s.control.signal()
 	if err := s.rt.rcToErr(C.velr_go_stream_tx_next_table(&s.rt.api, ptr, &out, &has, &errPtr), errPtr); err != nil {
 		return nil, err
 	}
@@ -3682,7 +4013,7 @@ func (s *TxStream) NextTable() (*Table, error) {
 	if out == nil {
 		return nil, newError(errErr, "transaction stream returned null table")
 	}
-	return newTable(s.rt, out), nil
+	return newTable(s.rt, out, s.control.retain()), nil
 }
 
 // Close releases the transaction stream. It is safe to call more than once.
@@ -3698,6 +4029,7 @@ func (s *TxStream) Close() error {
 	s.mu.Unlock()
 	runtime.SetFinalizer(s, nil)
 	C.velr_go_exec_tx_close(&s.rt.api, ptr)
+	s.control.release()
 	return nil
 }
 
@@ -3779,10 +4111,10 @@ func (sp *Savepoint) Rollback() error {
 	return sp.rt.rcToErr(C.velr_go_sp_rollback(&sp.rt.api, ptr, &errPtr), errPtr)
 }
 
-// Close releases the native savepoint handle without an explicit release or rollback.
-//
-// If the savepoint is still active, the native runtime rolls back to it and
-// releases it.
+// Close closes the savepoint handle; repeated calls are harmless.
+// An active savepoint rolls back changes after it and releases itself,
+// including a savepoint created with SavepointNamed. Call Release instead
+// when you want to preserve those changes.
 func (sp *Savepoint) Close() error {
 	sp.mu.Lock()
 	ptr := sp.ptr

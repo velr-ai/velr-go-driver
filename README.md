@@ -1,70 +1,29 @@
-# Velr
+# Velr for Go
 
-Velr is an embedded property-graph database from Velr.ai, queried using openCypher.
+Velr is an embedded property-graph database queried with openCypher. This module
+includes the database runtime and a synchronous Go API for memory and local-file
+databases.
 
-It runs in-process and is designed for local, embedded, and edge use cases.
+## Requirements and installation
 
-This module provides the **Go bindings** for Velr and bundles the database
-runtime. It exposes an idiomatic Go API for executing Cypher
-queries, streaming result tables, working with transactions, decoding graph
-values, and importing or exporting Arrow data.
+- Go 1.22 or newer, cgo enabled, and a C compiler for your target.
+- Bundled runtimes: macOS arm64/amd64, Linux arm64/amd64 with glibc, and Windows
+  amd64. Linux musl environments, including Alpine, are unsupported by these bundles.
+- A writable runtime cache that permits native-library loading, or a preinstalled
+  compatible library selected with `VELR_RUNTIME_PATH`.
+- `SEARCH` and creation options below require Velr runtime 0.2.62 or newer.
+  Use a driver and runtime from the same release.
 
-For the main Velr public entry point, see
-[velr-ai/velr](https://github.com/velr-ai/velr).
-For the Velr website, see [velr.ai](https://velr.ai/).
-For generated Go API documentation, see
-[pkg.go.dev/github.com/velr-ai/velr-go-driver](https://pkg.go.dev/github.com/velr-ai/velr-go-driver).
-
-## Community
-
-- **Community and questions:** [GitHub Discussions](https://github.com/velr-ai/velr/discussions)
-- **Bug reports and feature requests:** [GitHub Issues](https://github.com/velr-ai/velr/issues)
-- **Go examples:** [velr-go-examples](https://github.com/velr-ai/velr-go-examples)
-
-We'd love to have you join the Velr community.
-
----
-
-## Compatibility
-
-### Schema version 11 compatibility
-
-New databases use schema version 11. Databases at schema versions 3 through 9
-require an [explicit migration](#schema-migration) before graph queries can run.
-
-Create fulltext and vector indexes with Cypher DDL and query them with `CALL`.
-
----
-
-## Installation
-
-Install the Go module:
+Run installation from your application's Go module. For a new module, first run
+`go mod init example.com/velr-example` in its project directory:
 
 ```sh
 go get github.com/velr-ai/velr-go-driver@latest
 ```
 
-The module ships the supported Velr native runtime binaries. Applications do
-not need a Velr source checkout, Rust toolchain, or separate runtime package.
+## Quick start
 
-Supported bundled platforms:
-
-- `darwin-arm64`
-- `darwin-x64`
-- `linux-x64-gnu`
-- `linux-arm64-gnu`
-- `win32-x64-msvc`
-
-### Licensing In Simple Terms
-
-- The **Go binding source code** in this module is licensed under the MIT
-  license in [`LICENSE`](LICENSE).
-- The **bundled native runtime binaries** may be used and freely redistributed
-  in unmodified form under the terms of [`LICENSE.runtime`](LICENSE.runtime).
-
----
-
-## Quick Start
+Save this as `main.go` in the application module and run `go run .`:
 
 ```go
 package main
@@ -83,15 +42,149 @@ func main() {
     }
     defer db.Close()
 
-    err = db.RunWithParams("CREATE (:Person {name: $name, born: $born})", velr.Params{
-        "name": "Keanu Reeves",
-        "born": 1964,
-    })
+    if err := db.RunWithParams("CREATE (:Person {name: $name, born: $born})", velr.Params{
+        "name": "Keanu Reeves", "born": 1964,
+    }); err != nil {
+        log.Fatal(err)
+    }
+    rows, err := db.QueryWithParams(
+        "MATCH (p:Person {name: $name}) RETURN p.name AS name, p.born AS born",
+        velr.Params{"name": "Keanu Reeves"},
+    )
     if err != nil {
         log.Fatal(err)
     }
+    fmt.Println(rows[0]["name"], rows[0]["born"]) // Keanu Reeves 1964
+}
+```
 
-    rows, err := db.Query("MATCH (p:Person) RETURN p.name AS name, p.born AS born")
+Subsequent snippets can be placed inside `main`. They reuse the `velr`, `fmt`,
+and `log` imports above and an open connection named `db`, unless they open one
+explicitly. Close the connection when `main` finishes.
+
+## Queries and results
+
+### In-memory, persistent, and read-only databases
+
+`OpenInMemory()` creates a private ephemeral database. `Open(path)` opens or
+creates a persistent database; its parent directory must exist:
+
+```go
+db, err := velr.Open("graph.db")
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+```
+
+`OpenReadonly` requires an existing supported database and never creates,
+initializes, migrates, or repairs it:
+
+```go
+reader, err := velr.OpenReadonly("graph.db")
+if err != nil {
+    log.Fatal(err)
+}
+defer reader.Close()
+rows, err := reader.Query("MATCH (n) RETURN count(n) AS count")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(rows)
+```
+
+### Create a database with explicit options
+
+`Create(path, options)` creates a new database and rejects an existing file;
+`CreateInMemory(options)` creates a private in-memory database. To choose a
+creation-time relationship property selection, pass zero or one case-sensitive,
+nonempty name:
+
+```go
+configured, err := velr.CreateInMemory(velr.CreateOptions{
+    InlineEdgeProperties: []string{"weight"},
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer configured.Close()
+if err := configured.RunWithParams("CREATE ()-[:LINK {weight:$weight}]->()",
+    velr.Params{"weight": 0.5}); err != nil {
+    log.Fatal(err)
+}
+names, err := configured.InlineEdgeProperties()
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(names) // [weight]
+```
+
+The selection applies across relationship types, persists when a file is reopened,
+and cannot be changed after creation. Read and write every value through ordinary Cypher.
+Use `CreateOptions{}` for the default empty selection.
+
+### Choose a query method and bind parameters
+
+Connections and transactions expose the same query choices:
+
+| Method | Use it for | Result ownership |
+|---|---|---|
+| `Query` | Collect exactly one table as `[]map[string]any` | Automatically closes its table |
+| `Run` | Writes or scripts whose rows you do not need | Drains and closes results |
+| `ExecOne` | Exactly one table with metadata and row access | Close the table |
+| `Exec` | Scripts that may produce multiple tables | Close the stream and each table |
+
+Bind `$name` through `Params` keys without `$`. Values accept `nil`, booleans,
+integers fitting `int64`, finite floats, strings, `json.RawMessage`, nested
+lists/arrays, and maps with string keys. Convert structs to maps or
+`json.RawMessage`. This example creates nodes from records and collects a filtered result:
+
+```go
+if err := db.RunWithParams(
+    "UNWIND $people AS p CREATE (:Person {name:p.name, age:p.age})",
+    velr.Params{"people": []map[string]any{
+        {"name": "Alice", "age": 42}, {"name": "Bob", "age": 17},
+    }},
+); err != nil {
+    log.Fatal(err)
+}
+rows, err := db.QueryWithParams(
+    "MATCH (p:Person) WHERE p.age >= $minAge RETURN p.name AS name, p.age AS age",
+    velr.Params{"minAge": 18},
+)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(rows) // [map[age:42 name:Alice]]
+```
+
+`Query` collects all rows in memory. `Cell.Value()` produces `nil`, `bool`,
+`int64`, `float64`, strings, or decoded JSON. JSON numbers use `float64`; use a
+`json.Decoder` with `UseNumber` on `Cell.Bytes` when exact JSON integers matter.
+`AsProperty()` decodes nodes, relationships, paths, and spatial values;
+`AsPropertyValue()` returns typed property values. Use unique result aliases:
+Cypher rejects duplicate result column names.
+
+### Stream tables and read typed rows
+
+For scripts, advance tables with `NextTable`; `nil` means exhaustion:
+
+```go
+stream, err := db.Exec("RETURN 1 AS one; RETURN 2 AS two")
+if err != nil {
+    log.Fatal(err)
+}
+defer stream.Close()
+for {
+    table, err := stream.NextTable()
+    if err != nil {
+        log.Fatal(err)
+    }
+    if table == nil {
+        break
+    }
+    rows, err := table.ToObjects()
+    table.Close()
     if err != nil {
         log.Fatal(err)
     }
@@ -99,573 +192,383 @@ func main() {
 }
 ```
 
-Open a file-backed database instead of an in-memory database:
+For large results, open a cursor instead of collecting an array. `NextInto`
+scans into matching destination types and returns `false` at exhaustion:
 
 ```go
-db, err := velr.Open("mygraph.db")
-```
-
-Open an existing database for reads only:
-
-```go
-db, err := velr.OpenReadonly("mygraph.db")
-```
-
-`OpenReadonly` never creates, initializes, migrates, or repairs a database. The
-file must already exist and have a supported Velr schema version. After
-migrating an older database on a writable connection, reopen any read-only
-connections before querying it.
-
-Connections and active handles are not safe for concurrent use. Use one
-connection per goroutine when you need parallelism.
-
----
-
-## Database creation
-
-Use `Create` with `CreateOptions` to select zero or one inline edge property
-by its exact name. The selection applies across all relationship types and is
-fixed at creation. Empty options and databases newly created by `Open` select
-no inline edge property. `Create` returns an error if the destination file
-already exists.
-
-Eligible values include integers, floating-point numbers, and strings up to
-128 UTF-8 bytes. Read and write all values through ordinary Cypher queries.
-
-```go
-db, err := velr.Create("new-graph.db", velr.CreateOptions{
-    InlineEdgeProperties: []string{"timestamp"},
-})
-if err != nil {
-    log.Fatal(err)
-}
-defer db.Close()
-if err := db.Run("CREATE (:Person)-[:MET {timestamp: 1700000000}]->(:Person)"); err != nil {
-    log.Fatal(err)
-}
-```
-
-Use `CreateInMemory` for an in-memory database. Call
-`db.InlineEdgeProperties()` to inspect the selected names, including after
-reopening a file-backed database.
-
-## Schema Migration
-
-Open the database on a writable connection and call `Migrate` or run
-`MIGRATE DATABASE` outside an active transaction.
-
-```go
-db, err := velr.Open("mygraph.db")
-if err != nil {
-    log.Fatal(err)
-}
-defer db.Close()
-
-needs, err := db.NeedsMigration()
-if err != nil {
-    log.Fatal(err)
-}
-if needs {
-    report, err := db.Migrate()
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println(report.Status, report.FromVersion, report.ToVersion, report.Steps)
-}
-```
-
-The equivalent Cypher command is useful for scripts and tools that already work
-through query execution:
-
-```go
-table, err := db.ExecOne("MIGRATE DATABASE")
+table, err := db.ExecOne("RETURN 'Alice' AS name, 42 AS age")
 if err != nil {
     log.Fatal(err)
 }
 defer table.Close()
+rows, err := table.Rows()
+if err != nil {
+    log.Fatal(err)
+}
+defer rows.Close()
+var name string
+var age int64
+ok, err := rows.NextInto(&name, &age)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(ok, name, age) // true Alice 42
 ```
 
-## Maintenance
+`Rows.Next` returns cells; `velr.Scan` and `Cell.AssignTo` support typed access.
+`Table.ForEachRow` closes its temporary cursor even when the callback fails.
+Keep producing connections, transactions, and streams alive while reading.
+Close cursors before tables, tables before streams, and results before their
+transaction/connection. Cells own their Go byte slices; collected Go values
+remain usable after handles close.
 
-After large deletes or prune operations on a file-backed database, call
-`db.Vacuum()` from maintenance code when you want to compact the database file:
+### Row caps
+
+Pass at most one `QueryOptions` value. Combine settings using its helpers:
 
 ```go
-if err := db.Run("MATCH (n:Expired) DETACH DELETE n"); err != nil {
+rows, err := db.Query(
+    "UNWIND $values AS n RETURN n",
+    velr.WithParams(velr.Params{"values": []int{1, 2, 3}}).WithMaxResultRows(2),
+)
+if err != nil {
     log.Fatal(err)
+}
+fmt.Println(rows) // [map[n:1] map[n:2]]
+```
+
+Caps apply per table; `0` preserves metadata without rows. Existing Cypher
+`LIMIT` clauses still apply. Caps do not prevent writes or bound execution time.
+
+## Transactions
+
+### Commit on success and use savepoints
+
+`Transaction` commits when its callback returns `nil` and rolls back on an error
+or panic. A savepoint lets you discard part of the work:
+
+```go
+err := db.Transaction(func(tx *velr.Tx) error {
+    if err := tx.Run("CREATE (:Event {name:'kept'})"); err != nil {
+        return err
+    }
+    savepoint, err := tx.Savepoint()
+    if err != nil {
+        return err
+    }
+    defer savepoint.Close()
+    if err := tx.Run("CREATE (:Event {name:'discarded'})"); err != nil {
+        return err
+    }
+    return savepoint.Rollback()
+})
+if err != nil {
+    log.Fatal(err)
+}
+rows, err := db.Query("MATCH (e:Event) RETURN e.name AS name")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(rows) // [map[name:kept]]
+```
+
+For manual control, `BeginTx` returns a transaction with `Commit`, `Rollback`,
+and `Close`. Closing an uncommitted transaction rolls it back; commit/rollback
+consumes it. Finish result handles before ending a transaction.
+
+`Savepoint.Release` keeps changes; `Rollback` discards changes after the
+savepoint and releases it. Closing an active handle also rolls back and releases
+it, including named handles from `SavepointNamed`. Named savepoints release
+newest first. `RollbackTo(name)` retains its target and discards newer named
+savepoints. Commit releases surviving named savepoints automatically.
+
+## Errors and concurrency
+
+### Deadlines, cancellation, and errors
+
+`RunContext`, `ExecContext`, `ExecOneContext`, and `QueryContext` accept a
+`context.Context` covering execution and fetching. Add `context`, `errors`, and
+`time` to your imports for this example:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+rows, err := db.QueryContext(ctx,
+    "UNWIND range(1, 100) AS n RETURN n", velr.MaxResultRows(3))
+if err != nil {
+    if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+        log.Print("query stopped: ", err)
+    } else {
+        log.Fatal(err)
+    }
+} else {
+    fmt.Println(rows) // [map[n:1] map[n:2] map[n:3]]
+}
+```
+
+For a caller-controlled stop, derive a context with `context.WithCancel` and
+invoke its cancel function when needed, including from another goroutine. Keep
+contexts active until results are consumed or closed. If interruption ends an
+explicit transaction, start a new transaction.
+
+Check errors both when starting queries and while advancing tables or rows.
+Use `errors.As(err, &queryErr)` with `var queryErr *velr.Error` to inspect its
+numeric `Code` and diagnostic `Message`; invalid Go arguments can return
+ordinary Go errors. A connection and its handles must not be used concurrently
+by multiple goroutines. Use separate connections for parallel work. Explicit
+`Close` is idempotent.
+
+## Features and integrations
+
+### SEARCH
+
+Use `MATCH` or `OPTIONAL MATCH` with `SEARCH` through the normal query methods.
+Search indexes require a file-backed database and a mandatory `LIMIT` inside the
+search parentheses. Bind query values and limits through `Params`. `SCORE AS
+score` exposes a match's score; `ORDER BY score DESC` explicitly orders the rows.
+
+`LIMIT` accepts integers from `0` through `2147483647`; fulltext `SKIP`/`OFFSET`
+accepts integers from `0` through `9223372036854775807`. Pagination expressions
+can use constants and parameters, but cannot depend on query variables. Query
+values can refer to earlier variables, including correlated `EXISTS { ... }`
+and `COUNT { ... }` subqueries.
+
+Vector index names must be identifiers; use backticks for names containing
+spaces. Fulltext index names also accept string parameters. Search patterns
+contain one node or one relationship hop, with only the searched element named
+or constrained. For relationship indexes, use `MATCH ()-[r]->()` with `SEARCH r`.
+Null queries and zero limits produce no matches; `OPTIONAL MATCH` preserves the
+input row with null entity and score values. Use a fresh name for `SCORE AS`.
+
+### Fulltext search
+
+Search indexes require a file-backed database such as the `Open("graph.db")`
+connection above. Seed a paper, create an index, and query it:
+
+```go
+if err := db.RunWithParams(
+    "MERGE (p:Paper {id:'paper-1'}) SET p.title=$title, p.abstract=$abstract",
+    velr.Params{"title": "Graph databases", "abstract": "Connected data and vector search"},
+); err != nil {
+    log.Fatal(err)
+}
+if err := db.Run(`CREATE FULLTEXT INDEX paperText IF NOT EXISTS
+    FOR (n:Paper) ON EACH [n.title, n.abstract]`); err != nil {
+    log.Fatal(err)
+}
+rows, err := db.QueryWithParams(`
+    MATCH (node:Paper)
+    SEARCH node IN (FULLTEXT INDEX $index FOR $text
+        WITH ANALYZER 'standard' OFFSET $offset LIMIT $limit)
+    SCORE AS score RETURN node.title AS title, score ORDER BY score DESC
+`, velr.Params{"index": "paperText", "text": "title:graph", "offset": 0, "limit": 10})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(rows)
+```
+
+Search text supports terms, phrases, property scopes, boolean grouping,
+prefixes, and boosts. Scores rank results within a query; they are not
+normalized or comparable across queries. Writes update indexes automatically.
+`WITH ANALYZER` selects `standard` (default), `keyword`, `whitespace`, `simple`,
+or `english`; `standard-no-stop-words` and `default` are aliases for `standard`.
+An enclosing `WHERE` filters the selected page; fulltext has no inner `WHERE`.
+
+### Vector search
+
+Store precomputed embeddings as numeric vector/list properties and index them:
+
+```go
+if err := db.RunWithParams(
+    "MERGE (n:Chunk {id:'chunk-1'}) SET n.text=$text, n.embedding=$embedding, n.category=$category",
+    velr.Params{"text": "Connected data", "embedding": []float64{0.12, 0.34, 0.56}, "category": "guide"},
+); err != nil {
+    log.Fatal(err)
+}
+if err := db.Run(`CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
+    FOR (n:Chunk) ON (n.embedding) WITH [n.category]
+    OPTIONS {indexConfig: {dimensions: 3, metric: 'cosine'}}`); err != nil {
+    log.Fatal(err)
+}
+rows, err := db.QueryWithParams(`
+    MATCH (node:Chunk)
+    SEARCH node IN (VECTOR INDEX chunkEmbedding FOR $embedding
+        WHERE node.category = $category LIMIT $limit)
+    SCORE AS score RETURN node.text AS text, score ORDER BY score DESC
+`, velr.Params{"embedding": []float64{0.10, 0.30, 0.50}, "category": "guide", "limit": 10})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(rows)
+```
+
+Vectors must match the configured dimensions; cosine query vectors must be
+nonzero. Cosine `SEARCH` scores use `(1 + cosine) / 2`; Euclidean scores use
+`1 / (1 + squaredDistance)`. Both range from 0 to 1, with higher scores better.
+Dot-product indexes use unbounded dot scores. Exact scoring without an index
+is available as `vector.similarity.cosine(left, right)` in Cypher.
+
+Declare filter properties with index DDL `WITH [...]`. An inner `WHERE` filters
+before nearest-neighbor selection; an enclosing `WHERE`, before or after
+`SEARCH`, filters the selected matches and can return fewer than the limit.
+Inner filters support property comparisons, `IN`, boolean and null tests joined
+by `AND`. Each property permits one lower and one upper bound, or one equality,
+`IN`, or null test. Use the enclosing `WHERE` for other predicates. Vector search
+does not accept inner `SKIP`, `OFFSET`, or `WITH ANALYZER`.
+
+For text embeddings, `RegisterVectorEmbedder(name, callback)` supplies one finite
+`[]float32` per `VectorEmbeddingInput`, in order and with the requested
+dimensions. Reference its name with `embedder: 'name'` in an `ON EACH [...]`
+index. Do not call the same connection from the callback. See the
+[vector guide](GUIDE.md#vector-search) for callback inputs and tuning.
+
+### Compatible procedure calls
+
+Existing fulltext and vector procedures remain supported, including
+`queryRelationships` for relationship indexes. Run these queries against the
+file-backed database used above:
+
+```cypher
+CALL db.index.fulltext.queryNodes('paperText', $text, {limit: 10})
+YIELD node, score RETURN node, score ORDER BY score DESC
+```
+
+```cypher
+CALL db.index.vector.queryNodes('chunkEmbedding', 10, $embedding)
+YIELD node, score RETURN node, score ORDER BY score DESC
+```
+
+Fulltext procedure scores use the same scale as `SEARCH`; without an explicit
+options limit they return at most 1,000 matches. Vector procedures retain raw
+cosine or negative squared Euclidean scores, so their scores differ from
+`SEARCH`. Registered embedders also accept text queries through vector procedures.
+
+### Arrow import and export
+
+Export owned IPC file/Feather v2 bytes and bind them as queryable input:
+
+```go
+table, err := db.ExecOne("RETURN 'Alice' AS name, 42 AS age")
+if err != nil {
+    log.Fatal(err)
+}
+defer table.Close()
+ipc, err := table.ToArrowIPC()
+if err != nil {
+    log.Fatal(err)
+}
+if err := db.BindArrowIPC("_people", ipc); err != nil {
+    log.Fatal(err)
+}
+rows, err := db.Query("UNWIND BIND('_people') AS row RETURN row.name AS name, row.age AS age")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(rows) // [map[age:42 name:Alice]]
+```
+
+IPC streams are unsupported. Input bytes are borrowed only during binding;
+exported bytes outlive the table. Exports can materialize all rows, and column
+types are inferred per result: numeric columns may be integers/floats, mixed
+incompatible values become strings, and lists/maps/graph values become JSON
+UTF-8 strings rather than nested Arrow arrays. Nulls remain null;
+empty/all-null columns are UTF-8. Inspect the exported schema.
+
+`BindArrow` and `BindArrowChunks` accept C Data Interface columns from a Go Arrow
+implementation. Array release ownership transfers during the native call, even
+on failure; schemas/names are borrowed during the call. Consult their API
+contracts before passing pointers. No Go Arrow library is needed for the IPC
+byte methods above.
+
+### Inspect indexes, graph shape, and query plans
+
+```go
+indexes, err := db.Query(`SHOW INDEXES YIELD name, type, entityType, properties
+    RETURN name, type, entityType, properties ORDER BY name`)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(indexes)
+labels, err := db.Query("CALL db.labels() YIELD label RETURN label ORDER BY label")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(labels)
+shape, err := db.Query(`SHOW CURRENT GRAPH SHAPE
+    YIELD element_kind, element_name, property_name, observed_type
+    RETURN element_kind, element_name, property_name, observed_type`)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(shape)
+trace, err := db.Explain("MATCH (p:Paper) RETURN count(p) AS papers")
+if err != nil {
+    log.Fatal(err)
+}
+defer trace.Close()
+plan, err := trace.CompactString()
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(plan)
+```
+
+Graph shape describes stored data rather than declaring a schema. `Explain`
+does not execute a query; `ExplainAnalyze` executes it, including writes.
+`Snapshot` returns owned structured data usable after the trace closes.
+`SHOW INDEXES` lists range, fulltext, and vector indexes. `db.labels()`,
+`db.relationshipTypes()`, and `db.propertyKeys()` list the graph's labels,
+relationship types, and property names.
+
+## Compatibility and maintenance
+
+Opening never migrates a database automatically. New databases use schema
+version 11. Databases at schema versions 3 through 9 require explicit migration
+on a writable connection before graph queries or transactions can run. After
+migration, reopen any read-only connections. Databases created before Velr
+0.2.14 must be recreated by importing the source data.
+
+```go
+needsMigration, err := db.NeedsMigration()
+if err != nil {
+    log.Fatal(err)
+}
+if needsMigration {
+    report, err := db.Migrate()
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(report.Status, report.FromVersion, report.ToVersion)
 }
 if err := db.Vacuum(); err != nil {
     log.Fatal(err)
 }
 ```
 
-`Vacuum()` must run on a writable current-schema connection outside an open
-transaction. The equivalent command for scripts is `VACUUM DATABASE`.
-
----
-
-## Query Execution
-
-Velr exposes four main ways to run Cypher:
-
-- `Run` executes Cypher and drains all result tables.
-- `Exec` returns a stream when a statement can produce multiple result tables.
-- `ExecOne` returns exactly one table.
-- `Query` converts one table into `[]map[string]any`.
-
-Convenience helpers such as `RunWithParams`, `ExecOneWithParams`, and
-`QueryWithParams` bind named Cypher parameters:
-
-```go
-rows, err := db.QueryWithParams(
-    "MATCH (p:Person {name:$name}) RETURN p.born AS born",
-    velr.Params{"name": "Keanu Reeves"},
-)
-```
-
-Query text uses `$name`; map keys omit the leading `$`. Parameters are values,
-not Cypher string interpolation.
-
-Use `MaxResultRows` when you want a per-result-table row cap:
-
-```go
-rows, err := db.Query(
-    "MATCH (p:Person) RETURN p.name AS name ORDER BY name",
-    velr.MaxResultRows(100),
-)
-```
-
-Supported parameter values are `nil`, `bool`, signed and unsigned integers that
-fit `int64`, finite floats, `string`, `json.RawMessage`, lists, arrays, and maps
-with string keys. Convert structs to maps or explicit `json.RawMessage` before
-binding them.
-
----
-
-## Reading Results
-
-For typed row handling, use `Rows.NextInto` or `velr.Scan`:
-
-```go
-table, err := db.ExecOneWithParams(
-    "MATCH (p:Person {name:$name}) RETURN p.name, p.born",
-    velr.Params{"name": "Keanu Reeves"},
-)
-if err != nil {
-    log.Fatal(err)
-}
-defer table.Close()
-
-rows, err := table.Rows()
-if err != nil {
-    log.Fatal(err)
-}
-defer rows.Close()
-
-var name string
-var born int64
-ok, err := rows.NextInto(&name, &born)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println(ok, name, born)
-```
-
-Result helpers:
-
-- `Table.ColumnCount` and `Table.ColumnNames` inspect result metadata.
-- `Table.Rows` opens a row cursor.
-- `Table.ForEachRow`, `Table.Collect`, and `Table.ToObjects` collect results.
-- `Rows.Next` returns `[]Cell`; `Rows.NextInto` scans into pointers.
-- `Cell.Value` returns plain Go values.
-- `Cell.AsBool`, `AsInt64`, `AsFloat64`, `AsString`, `DecodeJSON`, and
-  `AssignTo` provide stricter conversions.
-- `Cell.AsPropertyValue` returns a typed `velr.PropertyValue` for scalar
-  property values and lists.
-
-`Cell.AsProperty` adds richer decoding for Velr graph and property values.
-Nodes become `velr.Node`, relationships become `velr.Relationship`, paths
-become `velr.Path`, and spatial GeoJSON values become `velr.GeoJSON`.
-`Node.Properties` and `Relationship.Properties` are `map[string]velr.PropertyValue`.
-Use `PropertyValue.Type` or `PropertyValue.Kind()` for the Velr kind, and
-`PropertyValue.GoValue()` when you want ordinary Go values.
-
----
-
-## Transactions And Savepoints
-
-Use `Transaction` for commit-on-success and rollback-on-error:
-
-```go
-err := db.Transaction(func(tx *velr.Tx) error {
-    if err := tx.Run("CREATE (:Event {name:'start'})"); err != nil {
-        return err
-    }
-
-    sp, err := tx.Savepoint()
-    if err != nil {
-        return err
-    }
-
-    if err := tx.Run("CREATE (:Event {name:'discard'})"); err != nil {
-        _ = sp.Close()
-        return err
-    }
-    return sp.Rollback()
-})
-```
-
-Explicit transactions are available with `BeginTx`, `Commit`, `Rollback`, and
-`Close`. Closing an uncommitted transaction rolls it back.
-
-Named savepoints use `SavepointNamed`, `RollbackTo`, and `ReleaseSavepoint`.
-Named savepoints are stack-like: release the most recently created active named
-savepoint first. `Commit` automatically releases any still-active named
-savepoints from newest to oldest so that all surviving transaction changes are
-committed.
-
-`Savepoint.Release` keeps changes after the savepoint, `Savepoint.Rollback`
-discards them, and `Savepoint.Close` closes the native handle without an
-explicit release or rollback.
-
----
-
-## Introspection
-
-Use `SHOW CURRENT GRAPH SHAPE` to inspect the observed schema of the graph. It
-reports the shape present in stored data: node labels, relationship types,
-properties, observed value types, and counts. It is an observed shape surface,
-not a declared GQL graph type.
-
-```go
-rows, err := db.Query(`
-    SHOW CURRENT GRAPH SHAPE
-    YIELD element_kind, element_name, property_name, observed_type, owner_count
-    WHERE element_kind = 'node_property'
-    RETURN element_name, property_name, observed_type, owner_count
-`)
-```
-
-Use `YIELD` to compose the command with `WHERE` and `RETURN`. Plain
-`SHOW CURRENT GRAPH SHAPE` returns the default projection; `YIELD *` exposes the
-full current row shape.
-
----
-
-## OpenCypher Functions
-
-The bundled runtime supports the following openCypher functions and constructors:
-
-Graph and path: `id`, `type`, `labels`, `keys`, `properties`, `length`,
-`nodes`, and `relationships`.
-
-Lists and predicates: `size`, `head`, `last`, `tail`, `reverse`, `range`,
-`all`, `any`, `none`, and `single`.
-
-Strings and conversion: `coalesce`, `toInteger`, `toString`, `toLower`, `trim`,
-`substring`, and `split`.
-
-Numeric: `abs`, `ceil`, `rand`, `sign`, and `sqrt`.
-
-Temporal constructors and clocks: `date`, `time`, `localtime`, `datetime`,
-`localdatetime`, `duration`, `datetime.fromepoch`,
-`datetime.fromepochmillis`, and the `.realtime`, `.transaction`, and
-`.statement` variants for `date`, `time`, `localtime`, `datetime`, and
-`localdatetime`.
-
-Aggregates: `count`, `sum`, `avg`, `min`, `max`, `collect`,
-`percentileDisc`, and `percentileCont`.
-
-### Regular expression matching
-
-Use the openCypher operator `=~` to match an entire string against a regular
-expression. Matching is case-sensitive by default. Use `(?i)` for
-case-insensitive matching.
-
-```cypher
-RETURN 'alice' =~ '(?i)A.*' AS matched
-```
-
-This returns `true`.
-
-The pattern string uses the Rust regex dialect. Lookaround and backreferences
-are unsupported. A null or non-string operand yields `null`. An invalid
-pattern raises a query error when both operands are strings.
-See [supported pattern syntax](https://docs.rs/regex/latest/regex/#syntax).
-
----
-
-## Fulltext Search
-
-Fulltext search is available through normal Cypher execution. Define indexes
-with `CREATE FULLTEXT INDEX` and query them with
-`CALL db.index.fulltext.queryNodes(...)`.
-
-```go
-db, err := velr.Open("mygraph.db")
-if err != nil {
-    log.Fatal(err)
-}
-defer db.Close()
-
-err = db.Run(`
-    CREATE FULLTEXT INDEX paperText
-    FOR (n:Paper) ON EACH [n.title, n.abstract]
-`)
-if err != nil {
-    log.Fatal(err)
-}
-
-rows, err := db.QueryWithParams(`
-    CALL db.index.fulltext.queryNodes('paperText', $query)
-    YIELD node, score
-    RETURN node, score
-`, velr.Params{"query": `abstract:vector OR title:"query planning"`})
-```
-
-Fulltext queries return up to 1,000 matches by default. Pass a third
-argument such as `{limit: 5000}` to change the cap.
-
-Fulltext queries see changes made earlier in the current transaction.
-Opening a file-backed database for writing applies pending index updates
-and repairs missing or corrupt index data. If the shared index cannot serve
-the query's snapshot, Velr builds a temporary index for that search. This
-can happen when updates are pending, a concurrent writer has published a
-newer index, or a read-only connection opens an index that needs repair.
-The temporary build scans the indexed graph.
-
----
-
-## Vector Search
-
-Velr supports two vector index shapes.
-
-If your application already computes embeddings, store them as a vector/list
-property and index that property. No embedder is needed, and queries pass a
-numeric vector/list:
-
-```go
-err := db.Run(`
-    CREATE (:Chunk {
-      id: 'chunk-1',
-      text: 'Graph databases store connected data',
-      embedding: [0.12, 0.34, 0.56]
-    })
-`)
-if err != nil {
-    log.Fatal(err)
-}
-
-err = db.Run(`
-    CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
-    FOR (n:Chunk)
-    ON (n.embedding)
-    OPTIONS { indexConfig: { dimensions: 3, metric: 'cosine' } }
-`)
-if err != nil {
-    log.Fatal(err)
-}
-
-rows, err := db.Query(`
-    CALL db.index.vector.queryNodes('chunkEmbedding', 10, [0.10, 0.30, 0.50])
-    YIELD node, score
-    RETURN node, score
-`)
-```
-
-For exact query-time scoring without a native vector index, use the
-Neo4j-compatible scalar function `vector.similarity.cosine(left, right)` inside
-`WITH`, `WHERE`, `RETURN`, and `ORDER BY`.
-
-For text-to-vector search, register an embedding callback and reference it from
-`CREATE VECTOR INDEX`. Velr invokes the callback for index maintenance when
-indexed source values change and for text queries passed to
-`CALL db.index.vector.queryNodes(...)`.
-
-`OPTIONS { indexConfig: ... }` configures Velr vector indexes. Prefer the
-Neo4j-style names where they exist; shorter aliases are accepted for existing
-queries and examples.
-
-```cypher
-OPTIONS {
-  indexConfig: {
-    `vector.dimensions`: 384,
-    `vector.similarity_function`: 'cosine',
-    embedder: 'text',
-    cache_policy: 'required',
-    `vector.hnsw.ef_search`: 128
-  }
-}
-```
-
-Core options:
-
-| Option | Accepted aliases | Meaning |
-|---|---|---|
-| `` `vector.dimensions` `` | `dimensions` | Required vector width. Every stored vector, embedder output, and query vector must contain exactly this many values. |
-| `` `vector.similarity_function` `` | `metric`, `similarity_function` | Distance function. Use `cosine` for most semantic embeddings, `l2`/`euclidean` for geometric distance, and `dot`/`inner_product`/`max_inner_product` for inner-product retrieval. Default: `cosine`. |
-| `embedder` | `velr.embedder` | Name of a registered callback for `ON EACH [...]` indexes. Omit it for stored-vector indexes such as `ON (n.embedding)`. |
-| `embedder_fingerprint` | `embedderFingerprint`, `velr.embedder_fingerprint` | Optional model/version metadata stored with the index definition. Velr does not use it to call the embedder. |
-| `cache_policy` | `cachePolicy` | Embedder-backed indexes only. `required` stores generated embeddings in the database so index files can be rebuilt without recomputing them; `best_effort` skips cache write errors; `none` stores no generated embedding cache. Defaults: `required` with `embedder`, `none` without. Stored-vector indexes require `none` because the vector property is already the durable source. |
-
-HNSW tuning options:
-
-| Option | Integer count | Meaning |
-|---|---:|---|
-| `` `vector.hnsw.m` `` | `1..512` neighbors | Maximum graph connectivity per vector. For example, `16` means each vector keeps roughly 16 HNSW neighbor links. Higher values can improve recall on difficult datasets, with more memory, larger index files, and slower builds. |
-| `` `vector.hnsw.ef_construction` `` | `1..3200` candidates | Build-time candidate pool per inserted vector. For example, `320` means the builder considers a working set of 320 candidate neighbors while placing each vector. Higher values can improve index quality and recall, usually with slower index creation. |
-| `` `vector.hnsw.ef_search` `` | `1..3200` candidates | Query-time candidate pool. For example, `128` means each search keeps a working set of 128 candidate vectors while traversing the HNSW graph. Higher values can improve recall, usually with slower searches. Velr's default is `64`. |
-
-```go
-err := db.RegisterVectorEmbedder("toy", func(inputs []velr.VectorEmbeddingInput) ([][]float32, error) {
-    out := make([][]float32, len(inputs))
-    for i, input := range inputs {
-        out[i] = embed(input.Text(), input.Dimensions)
-    }
-    return out, nil
-})
-```
-
-The callback must return one finite `[]float32` embedding per input, with the
-exact dimension count requested by the index.
-
-`VectorEmbeddingInput` includes index name, dimensions, purpose, entity kind,
-entity id, and selected fields. Each `VectorEmbeddingField` carries a typed
-`PropertyValue`; use `field.Value.Type` or `field.Value.Kind()` to inspect the
-Velr kind, `field.Value.GoValue()` for ordinary Go values, and
-`VectorEmbeddingInput.Text()` to join display strings for text embedders.
-
-For file-backed databases, Velr can repair missing or corrupt vector index data
-from the stored vectors or from registered embedders, depending on how the
-index was created.
-
----
-
-## Arrow
-
-`Table.ToArrowIPC` exports a result table as Arrow IPC file bytes.
-`BindArrowIPC` imports Arrow IPC file bytes under a logical table name:
-
-```go
-table, err := db.ExecOne("MATCH (m:Movie) RETURN m.title AS title")
-if err != nil {
-    log.Fatal(err)
-}
-defer table.Close()
-
-ipc, err := table.ToArrowIPC()
-if err != nil {
-    log.Fatal(err)
-}
-
-if err := db.BindArrowIPC("_movies", ipc); err != nil {
-    log.Fatal(err)
-}
-```
-
-`BindArrow` and `BindArrowChunks` bind Arrow C Data Interface columns from
-whichever Go Arrow implementation your application uses. The `ArrowArray`
-pointers passed to `BindArrow` or `BindArrowChunks` are transferred to Velr by
-the ABI call. Do not release or reuse those arrays after calling; schemas and
-column names are borrowed only during the call.
-
-After binding a logical name, read the rows from Cypher with
-`UNWIND BIND(...)`:
-
-```go
-if err := db.BindArrow("_people", columns); err != nil {
-    log.Fatal(err)
-}
-
-if err := db.Run(`
-    UNWIND BIND('_people') AS row
-    CREATE (:Person {name: row.name, age: row.age})
-`); err != nil {
-    log.Fatal(err)
-}
-```
-
-The
-[arrow_columns example](https://github.com/velr-ai/velr-go-examples/tree/main/arrow_columns)
-shows a complete Apache Arrow Go export using `arrow/cdata` and malloc-backed
-Arrow buffers.
-
-Transactions also expose `Tx.BindArrowIPC`, `Tx.BindArrow`, and
-`Tx.BindArrowChunks`.
-
----
-
-## Explain
-
-Use `Explain` or `ExplainAnalyze` on `DB` or `Tx` to inspect a query plan:
-
-```go
-trace, err := db.Explain("MATCH (n) RETURN count(n)")
-if err != nil {
-    log.Fatal(err)
-}
-defer trace.Close()
-
-compact, err := trace.CompactString()
-```
-
-For structured access, use `PlanCount`, `PlanMeta`, `StepCount`, `StepMeta`,
-`StatementCount`, `StatementMeta`, `SQLitePlanCount`, `SQLitePlanDetail`,
-`SQLitePlanDetails`, or `Snapshot`. For compact rendering use `CompactLen`,
-`CompactBytes`, `CompactString`, or `WriteCompact`.
-
----
-
-## Errors And Lifecycle
-
-Runtime failures return `*velr.Error`. Use `errors.As` to access its `Code` and
-`Message` fields. `Code` is a numeric operation status. For Cypher errors,
-`Message` identifies the query category and compile-time or runtime phase. Query
-categories include `SyntaxError`, `TypeError`, `ArgumentError`,
-`EntityNotFound`, `ConstraintVerificationFailed`, `SemanticError`,
-`ParameterMissing`, `ProcedureNotFound`, and `ArithmeticError`. Diagnostic text
-explains the cause and provides context. Driver-side argument validation also
-returns ordinary Go errors.
-
-Check errors from query execution and from `Stream.NextTable`,
-`TxStream.NextTable`, and `Rows.Next` while consuming results. A returned stream
-or table does not mean the query has finished successfully.
-
-```go
-rows, err := db.Query("RETURN missing")
-if err != nil {
-    var queryErr *velr.Error
-    if errors.As(err, &queryErr) {
-        log.Printf("Velr status %d: %s", queryErr.Code, queryErr.Message)
-    } else {
-        log.Print(err)
-    }
-    return
-}
-fmt.Println(rows)
-```
-
-The example uses the standard `errors`, `fmt`, and `log` packages.
-
-Explicitly close `DB`, `Tx`, `Stream`, `TxStream`, `Table`, `Rows`,
-`Savepoint`, and `ExplainTrace` values. `Close` is idempotent on all closeable
-handle types. Finalizers are present as a leak safety net, but explicit close
-keeps native resources deterministic.
-
----
-
-## Examples
-
-Runnable examples live in
-[github.com/velr-ai/velr-go-examples](https://github.com/velr-ai/velr-go-examples).
-
-The examples cover queries, transactions and savepoints, schema
-migration and maintenance, read-only open, fulltext search, vector search,
-Arrow IPC, and Arrow C Data column binding. They use the published Go module;
-you do not need a Velr source checkout.
+Migration and vacuum require a writable connection outside a transaction;
+vacuum also requires the current schema. Their Cypher equivalents are
+`MIGRATE DATABASE` and `VACUUM DATABASE`. Migrate supported older databases
+before inspecting their graph shape.
+
+The runtime is extracted on first use into the OS user cache. Set
+`VELR_CACHE_DIR` to a writable location that permits native-library loading.
+For a deployment without a writable cache, supply a compatible decompressed
+library and set `VELR_RUNTIME_PATH` to its absolute path before first use.
+See [deployment configuration](GUIDE.md#deployment-configuration).
+
+## Reference and support
+
+- [Go API reference](https://pkg.go.dev/github.com/velr-ai/velr-go-driver), also
+  available with `go doc github.com/velr-ai/velr-go-driver`.
+- [Query language reference](QUERY_LANGUAGE.md): syntax, functions, search grammar, and restrictions.
+- [Extended driver guide](GUIDE.md): additional examples and tuning options.
+- [Runnable Go examples](https://github.com/velr-ai/velr-go-examples).
+- [Community questions](https://github.com/velr-ai/velr/discussions) and
+  [bug reports or feature requests](https://github.com/velr-ai/velr/issues).
 
 ## License
 
-The Go driver source is licensed under the MIT license in [`LICENSE`](LICENSE).
-The bundled native runtime binaries are licensed separately under
-[`LICENSE.runtime`](LICENSE.runtime).
+The binding source is [MIT licensed](LICENSE). The bundled native runtime is
+licensed separately under [LICENSE.runtime](LICENSE.runtime), which permits use
+and redistribution of unmodified binaries under its terms.

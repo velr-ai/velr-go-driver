@@ -88,6 +88,9 @@ import (
 // vector must have input.Dimensions finite float32 values.
 // Stored-vector indexes created with CREATE VECTOR INDEX ... ON (n.embedding)
 // index the stored vector/list property directly and do not call this callback.
+// Registration retains the callback until replacement or connection close. Do
+// not call the same connection from its callback; callback errors fail the
+// requesting query or index operation. Inputs and their fields own their Go data.
 type VectorEmbedder func(inputs []VectorEmbeddingInput) ([][]float32, error)
 
 // VectorEmbeddingPurpose explains why Velr is asking an embedder for embeddings.
@@ -240,7 +243,8 @@ func (t PropertyValueType) String() string {
 	}
 }
 
-// StorageValueType describes the storage class used to reconstruct a Velr value.
+// StorageValueType identifies the encoded representation of a callback field.
+// Use PropertyValue.Type and PropertyValue.GoValue for application processing.
 type StorageValueType int
 
 const (
@@ -292,10 +296,12 @@ type VectorEmbeddingField struct {
 	// Value is the decoded typed property value for this field.
 	Value PropertyValue
 
-	// StorageType is the original low-level storage class of the field.
+	// StorageType identifies the original encoded representation. Prefer Value
+	// for application processing.
 	StorageType StorageValueType
 
-	// RawStorage contains the runtime's raw storage bytes when exposed by the ABI.
+	// RawStorage contains the original encoded bytes when supplied. Prefer
+	// Value for typed access and Display for text embedding inputs.
 	RawStorage []byte
 
 	// RawJSON contains the canonical JSON bytes used to decode Value when present.
